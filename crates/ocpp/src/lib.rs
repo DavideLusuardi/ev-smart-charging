@@ -3,5 +3,5 @@
 pub mod error;
 pub mod rpc;
 
-pub use error::ErrorCode;
+pub use error::{DecodeError, ErrorCode, decode};
 pub use rpc::{Frame, FrameError, MessageId, MessageType};
