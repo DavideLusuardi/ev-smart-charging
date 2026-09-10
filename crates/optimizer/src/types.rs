@@ -249,6 +249,45 @@ pub trait Scheduler {
     fn schedule(&self, site: &SiteInput, sessions: &[SessionRequest]) -> Schedule;
 }
 
+/// A session competing for one slot's capacity.
+pub(crate) struct Candidate {
+    /// The most it can take in this slot: its max power, limited by the energy it still needs.
+    pub limit_w: f64,
+}
+
+/// Builds a schedule slot by slot. For each slot, `allocate` gets the sessions that are still
+/// present and the slot's capacity, and returns their power in the same order. Energy
+/// delivered in earlier slots is subtracted before the next one.
+pub(crate) fn schedule_per_slot(
+    site: &SiteInput,
+    sessions: &[SessionRequest],
+    allocate: impl Fn(&[Candidate], f64) -> Vec<f64>,
+) -> Schedule {
+    let hours = site.slot_hours();
+    let mut schedule = Schedule::zeros(site, sessions);
+    let mut needed: Vec<f64> = sessions.iter().map(|s| s.remaining_wh.max(0.0)).collect();
+    let active: Vec<usize> = sessions.iter().map(|s| s.active_slots(site)).collect();
+
+    for (k, &capacity) in site.capacity_w.iter().enumerate() {
+        let present: Vec<usize> = (0..sessions.len()).filter(|&i| k < active[i]).collect();
+        let candidates: Vec<Candidate> = present
+            .iter()
+            .map(|&i| Candidate {
+                limit_w: sessions[i].max_power_w.min(needed[i] / hours).max(0.0),
+            })
+            .collect();
+        let power = allocate(&candidates, capacity.max(0.0));
+        for (&i, p) in present.iter().zip(power) {
+            schedule
+                .power_w
+                .get_mut(&sessions[i].id)
+                .expect("zeros has every session")[k] = p;
+            needed[i] = (needed[i] - p * hours).max(0.0);
+        }
+    }
+    schedule
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

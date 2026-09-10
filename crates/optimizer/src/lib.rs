@@ -3,8 +3,10 @@
 //! Nothing here does IO or async work, so every strategy can be tested and benchmarked on
 //! its own. Power is in W, energy in Wh, and time in fixed-length slots.
 
+pub mod equal_share;
 pub mod types;
 
+pub use equal_share::EqualShare;
 pub use types::{
     EvseRef, Schedule, Scheduler, SessionId, SessionRequest, SiteInput, Slot, Violation,
 };
