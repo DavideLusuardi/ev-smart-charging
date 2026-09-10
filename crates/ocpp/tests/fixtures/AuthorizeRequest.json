@@ -1,0 +1,17 @@
+{
+  "idToken": {
+    "idToken": "EMP-IT-FBK-000123",
+    "type": "eMAID",
+    "additionalInfo": [{ "additionalIdToken": "fleet-42", "type": "FleetCard" }]
+  },
+  "certificate": "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ0FGRQ==\n-----END CERTIFICATE-----",
+  "iso15118CertificateHashData": [
+    {
+      "hashAlgorithm": "SHA256",
+      "issuerNameHash": "8a1b4c1f7e2d",
+      "issuerKeyHash": "3c9e0f2a6b71",
+      "serialNumber": "5E6F7A",
+      "responderURL": "http://ocsp.example.com"
+    }
+  ]
+}

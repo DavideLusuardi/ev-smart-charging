@@ -1,0 +1,31 @@
+{
+  "eventType": "Started",
+  "timestamp": "2026-09-28T10:00:00Z",
+  "triggerReason": "CablePluggedIn",
+  "seqNo": 0,
+  "offline": false,
+  "numberOfPhasesUsed": 3,
+  "cableMaxCurrent": 32,
+  "reservationId": 17,
+  "transactionInfo": {
+    "transactionId": "3f2b8d6e-1c0a-4d9b-9a57-6e1f0c2b7d44",
+    "chargingState": "EVConnected",
+    "remoteStartId": 9
+  },
+  "evse": { "id": 1, "connectorId": 1 },
+  "idToken": { "idToken": "04A2B3C4D5E6F7", "type": "ISO14443" },
+  "meterValue": [
+    {
+      "timestamp": "2026-09-28T10:00:00Z",
+      "sampledValue": [
+        {
+          "value": 1520.5,
+          "context": "Transaction.Begin",
+          "measurand": "Energy.Active.Import.Register",
+          "location": "Outlet",
+          "unitOfMeasure": { "unit": "Wh", "multiplier": 0 }
+        }
+      ]
+    }
+  ]
+}

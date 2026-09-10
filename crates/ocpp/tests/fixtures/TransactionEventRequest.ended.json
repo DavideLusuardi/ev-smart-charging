@@ -1,0 +1,30 @@
+{
+  "eventType": "Ended",
+  "timestamp": "2026-09-28T10:32:10Z",
+  "triggerReason": "EVDeparted",
+  "seqNo": 5,
+  "transactionInfo": {
+    "transactionId": "3f2b8d6e-1c0a-4d9b-9a57-6e1f0c2b7d44",
+    "chargingState": "Idle",
+    "timeSpentCharging": 1890,
+    "stoppedReason": "EVDisconnected"
+  },
+  "meterValue": [
+    {
+      "timestamp": "2026-09-28T10:32:10Z",
+      "sampledValue": [
+        {
+          "value": 46020.5,
+          "context": "Transaction.End",
+          "measurand": "Energy.Active.Import.Register",
+          "signedMeterValue": {
+            "signedMeterData": "AP///////wEAAAAAAAAAAA==",
+            "signingMethod": "ECDSA-secp256r1-SHA256",
+            "encodingMethod": "OCMF",
+            "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE"
+          }
+        }
+      ]
+    }
+  ]
+}

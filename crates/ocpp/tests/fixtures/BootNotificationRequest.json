@@ -1,0 +1,10 @@
+{
+  "chargingStation": {
+    "serialNumber": "SN-000017",
+    "model": "HubCharger-300",
+    "modem": { "iccid": "8939100000000000001", "imsi": "222100000000001" },
+    "vendorName": "ExampleEV",
+    "firmwareVersion": "2.4.1"
+  },
+  "reason": "PowerUp"
+}

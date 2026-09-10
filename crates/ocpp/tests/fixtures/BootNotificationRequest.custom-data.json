@@ -1,0 +1,9 @@
+{
+  "customData": { "vendorId": "com.example.ev", "bootCounter": 12 },
+  "chargingStation": {
+    "customData": { "vendorId": "com.example.ev", "hardwareRevision": "B" },
+    "model": "WallBox-22",
+    "vendorName": "ExampleEV"
+  },
+  "reason": "Watchdog"
+}

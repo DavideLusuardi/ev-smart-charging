@@ -1,0 +1,46 @@
+{
+  "evseId": 2,
+  "chargingProfile": {
+    "id": 7,
+    "stackLevel": 1,
+    "chargingProfilePurpose": "TxDefaultProfile",
+    "chargingProfileKind": "Recurring",
+    "recurrencyKind": "Daily",
+    "validFrom": "2026-09-01T00:00:00Z",
+    "validTo": "2026-12-31T23:59:59Z",
+    "chargingSchedule": [
+      {
+        "id": 70,
+        "startSchedule": "2026-09-01T00:00:00Z",
+        "duration": 86400,
+        "chargingRateUnit": "A",
+        "minChargingRate": 6.0,
+        "chargingSchedulePeriod": [
+          { "startPeriod": 0, "limit": 32.0, "numberPhases": 3 },
+          { "startPeriod": 28800, "limit": 16.0, "numberPhases": 1, "phaseToUse": 2 }
+        ],
+        "salesTariff": {
+          "id": 5,
+          "salesTariffDescription": "Workplace day tariff",
+          "numEPriceLevels": 2,
+          "salesTariffEntry": [
+            {
+              "relativeTimeInterval": { "start": 0, "duration": 28800 },
+              "ePriceLevel": 1,
+              "consumptionCost": [
+                {
+                  "startValue": 0.0,
+                  "cost": [
+                    { "costKind": "RelativePricePercentage", "amount": 80 },
+                    { "costKind": "CarbonDioxideEmission", "amount": 120, "amountMultiplier": -1 }
+                  ]
+                }
+              ]
+            },
+            { "relativeTimeInterval": { "start": 28800 }, "ePriceLevel": 2 }
+          ]
+        }
+      }
+    ]
+  }
+}

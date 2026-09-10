@@ -1,0 +1,17 @@
+{
+  "evseId": 1,
+  "chargingNeeds": {
+    "requestedEnergyTransfer": "DC",
+    "departureTime": "2026-09-28T10:40:00Z",
+    "dcChargingParameters": {
+      "evMaxCurrent": 400,
+      "evMaxVoltage": 800,
+      "energyAmount": 45000,
+      "evMaxPower": 250000,
+      "stateOfCharge": 20,
+      "evEnergyCapacity": 77000,
+      "fullSoC": 100,
+      "bulkSoC": 80
+    }
+  }
+}

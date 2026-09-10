@@ -1,0 +1,4 @@
+{
+  "status": "Rejected",
+  "statusInfo": { "reasonCode": "InvalidSchedule", "additionalInfo": "Limit above EVSE rating" }
+}

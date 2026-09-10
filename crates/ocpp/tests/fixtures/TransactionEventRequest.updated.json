@@ -1,0 +1,22 @@
+{
+  "eventType": "Updated",
+  "timestamp": "2026-09-28T10:10:00Z",
+  "triggerReason": "MeterValuePeriodic",
+  "seqNo": 1,
+  "transactionInfo": {
+    "transactionId": "3f2b8d6e-1c0a-4d9b-9a57-6e1f0c2b7d44",
+    "chargingState": "Charging",
+    "timeSpentCharging": 600
+  },
+  "meterValue": [
+    {
+      "timestamp": "2026-09-28T10:10:00Z",
+      "sampledValue": [
+        { "value": 26520.5, "context": "Sample.Periodic", "measurand": "Energy.Active.Import.Register" },
+        { "value": 150000.0, "context": "Sample.Periodic", "measurand": "Power.Active.Import" },
+        { "value": 62.0, "measurand": "SoC", "location": "EV", "unitOfMeasure": { "unit": "Percent" } },
+        { "value": 229.8, "measurand": "Voltage", "phase": "L1-N" }
+      ]
+    }
+  ]
+}

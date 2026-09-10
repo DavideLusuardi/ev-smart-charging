@@ -1,0 +1,6 @@
+{
+  "totalCost": 12.45,
+  "chargingPriority": 1,
+  "idTokenInfo": { "status": "Accepted" },
+  "updatedPersonalMessage": { "format": "ASCII", "content": "Charging session ended" }
+}
