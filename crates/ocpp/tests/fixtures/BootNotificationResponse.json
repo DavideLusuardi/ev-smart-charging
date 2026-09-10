@@ -1,0 +1,6 @@
+{
+  "currentTime": "2026-09-28T10:00:00Z",
+  "interval": 300,
+  "status": "Accepted",
+  "statusInfo": { "reasonCode": "Registered", "additionalInfo": "Station known to the CSMS" }
+}

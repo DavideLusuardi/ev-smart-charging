@@ -1,0 +1,13 @@
+{
+  "idTokenInfo": {
+    "status": "Accepted",
+    "cacheExpiryDateTime": "2026-10-28T00:00:00Z",
+    "chargingPriority": 0,
+    "language1": "en",
+    "language2": "it",
+    "evseId": [1, 2],
+    "groupIdToken": { "idToken": "GROUP-7", "type": "Central" },
+    "personalMessage": { "format": "UTF8", "language": "en", "content": "Welcome back" }
+  },
+  "certificateStatus": "Accepted"
+}

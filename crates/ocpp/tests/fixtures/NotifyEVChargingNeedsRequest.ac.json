@@ -1,0 +1,14 @@
+{
+  "evseId": 3,
+  "maxScheduleTuples": 24,
+  "chargingNeeds": {
+    "requestedEnergyTransfer": "AC_three_phase",
+    "departureTime": "2026-09-28T17:30:00Z",
+    "acChargingParameters": {
+      "energyAmount": 30000,
+      "evMinCurrent": 6,
+      "evMaxCurrent": 32,
+      "evMaxVoltage": 230
+    }
+  }
+}

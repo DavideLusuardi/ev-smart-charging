@@ -1,0 +1,17 @@
+{
+  "evseId": 0,
+  "chargingProfile": {
+    "id": 1,
+    "stackLevel": 0,
+    "chargingProfilePurpose": "TxDefaultProfile",
+    "chargingProfileKind": "Absolute",
+    "chargingSchedule": [
+      {
+        "id": 1,
+        "chargingRateUnit": "W",
+        "startSchedule": "2026-09-28T09:59:30Z",
+        "chargingSchedulePeriod": [{ "startPeriod": 0, "limit": 1400.0 }]
+      }
+    ]
+  }
+}

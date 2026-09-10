@@ -1,0 +1,8 @@
+{
+  "chargingProfileId": 101,
+  "chargingProfileCriteria": {
+    "evseId": 1,
+    "chargingProfilePurpose": "TxProfile",
+    "stackLevel": 0
+  }
+}
