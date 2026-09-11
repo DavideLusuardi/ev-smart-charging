@@ -250,8 +250,11 @@ pub trait Scheduler {
 }
 
 /// A session competing for one slot's capacity.
-pub(crate) struct Candidate {
-    /// The most it can take in this slot: its max power, limited by the energy it still needs.
+pub(crate) struct Candidate<'a> {
+    pub session: &'a SessionRequest,
+    /// Energy the session still needs before this slot.
+    pub needed_wh: f64,
+    /// The most it can take in this slot: its max power, limited by `needed_wh`.
     pub limit_w: f64,
 }
 
@@ -261,7 +264,7 @@ pub(crate) struct Candidate {
 pub(crate) fn schedule_per_slot(
     site: &SiteInput,
     sessions: &[SessionRequest],
-    allocate: impl Fn(&[Candidate], f64) -> Vec<f64>,
+    allocate: impl Fn(&[Candidate<'_>], f64) -> Vec<f64>,
 ) -> Schedule {
     let hours = site.slot_hours();
     let mut schedule = Schedule::zeros(site, sessions);
@@ -270,9 +273,11 @@ pub(crate) fn schedule_per_slot(
 
     for (k, &capacity) in site.capacity_w.iter().enumerate() {
         let present: Vec<usize> = (0..sessions.len()).filter(|&i| k < active[i]).collect();
-        let candidates: Vec<Candidate> = present
+        let candidates: Vec<Candidate<'_>> = present
             .iter()
             .map(|&i| Candidate {
+                session: &sessions[i],
+                needed_wh: needed[i],
                 limit_w: sessions[i].max_power_w.min(needed[i] / hours).max(0.0),
             })
             .collect();

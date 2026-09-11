@@ -22,7 +22,7 @@ impl Scheduler for EqualShare {
 /// Water-filling: raise a common level until capacity runs out, capping each session at its
 /// limit. Visiting sessions from the smallest limit up means each capped session's leftover
 /// is shared by everyone after it.
-fn water_fill(candidates: &[Candidate], capacity_w: f64) -> Vec<f64> {
+fn water_fill(candidates: &[Candidate<'_>], capacity_w: f64) -> Vec<f64> {
     let mut order: Vec<usize> = (0..candidates.len()).collect();
     order.sort_by(|&a, &b| candidates[a].limit_w.total_cmp(&candidates[b].limit_w));
 
