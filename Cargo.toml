@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["now", "serde", "std"] }
+good_lp = { version = "1.15.3", default-features = false, features = ["highs"] }
 jsonschema = { version = "0.58.1", default-features = false }
 proptest = "1.11.0"
 serde = { version = "1.0.229", features = ["derive"] }
