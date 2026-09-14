@@ -1,6 +1,8 @@
 //! Property tests over random instances.
 
-use optimizer::{Edf, EqualShare, EvseRef, Schedule, Scheduler, SessionRequest, SiteInput};
+use optimizer::{
+    Edf, EqualShare, EvseRef, PlanRequest, Planner, Schedule, Scheduler, SessionRequest, SiteInput,
+};
 use proptest::prelude::*;
 
 const NOW: i64 = 1_000;
@@ -123,6 +125,56 @@ proptest! {
                 lp >= heuristic * (1.0 - 2e-4) - 1e-3,
                 "lp {} Wh < {} {} Wh", lp, strategy.name(), heuristic
             );
+        }
+    }
+}
+
+fn arb_plan_request() -> impl Strategy<Value = PlanRequest> {
+    let slot_secs = prop::sample::select(vec![60u32, 300, 900]);
+    (
+        slot_secs,
+        0..3600i64,
+        0.0..300_000.0f64,
+        0..6usize,
+        0.0..3_000.0f64,
+    )
+        .prop_flat_map(
+            |(slot_secs, into_slot, capacity_w, idle_evses, fallback_limit_w)| {
+                let now_secs = NOW * i64::from(slot_secs) + into_slot % i64::from(slot_secs);
+                arb_sessions(60).prop_map(move |sessions| PlanRequest {
+                    now_secs,
+                    slot_secs,
+                    capacity_w,
+                    idle_evses,
+                    fallback_limit_w,
+                    sessions,
+                })
+            },
+        )
+}
+
+proptest! {
+    /// At every time a profile can change, the planned limits sum to at most the capacity
+    /// left after the idle EVSEs' reserve, and no limit is negative.
+    #[test]
+    fn planned_profiles_respect_capacity(
+        request in arb_plan_request(),
+        strategy in 0..strategies().len(),
+        max_horizon in 1..80usize,
+    ) {
+        let planner = Planner::new(strategies().swap_remove(strategy), max_horizon);
+        let plan = planner.plan(&request);
+        prop_assert_eq!(plan.limits.len(), request.sessions.len());
+        prop_assert_eq!(plan.schedule.validate(&plan.site, &request.sessions), Ok(()));
+
+        let capacity = request.planning_capacity_w();
+        let mut times: Vec<i64> = plan.limits.iter().flat_map(|l| l.profile.breakpoints()).collect();
+        times.push(i64::MAX / 2);
+        for t in times {
+            let values: Vec<f64> = plan.limits.iter().map(|l| l.profile.value_at(t)).collect();
+            prop_assert!(values.iter().all(|&v| v >= 0.0), "negative limit at {}", t);
+            let total: f64 = values.iter().sum();
+            prop_assert!(total <= capacity + 1e-6 * capacity + 1e-3, "{} W > {} W at {}", total, capacity, t);
         }
     }
 }

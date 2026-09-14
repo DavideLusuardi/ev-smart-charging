@@ -249,6 +249,16 @@ pub trait Scheduler {
     fn schedule(&self, site: &SiteInput, sessions: &[SessionRequest]) -> Schedule;
 }
 
+impl<S: Scheduler + ?Sized> Scheduler for Box<S> {
+    fn name(&self) -> &'static str {
+        (**self).name()
+    }
+
+    fn schedule(&self, site: &SiteInput, sessions: &[SessionRequest]) -> Schedule {
+        (**self).schedule(site, sessions)
+    }
+}
+
 /// A session competing for one slot's capacity.
 pub(crate) struct Candidate<'a> {
     pub session: &'a SessionRequest,
