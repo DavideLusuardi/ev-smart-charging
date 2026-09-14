@@ -596,6 +596,7 @@ name = "optimizer"
 version = "0.1.0"
 dependencies = [
  "good_lp",
+ "proptest",
  "thiserror",
 ]
 
