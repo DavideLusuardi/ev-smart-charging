@@ -54,10 +54,12 @@ fn arb_instance() -> impl Strategy<Value = (SiteInput, Vec<SessionRequest>)> {
 }
 
 fn strategies() -> Vec<Box<dyn Scheduler>> {
-    let mut all: Vec<Box<dyn Scheduler>> = vec![Box::new(EqualShare), Box::new(Edf)];
-    #[cfg(feature = "lp")]
-    all.push(Box::new(optimizer::Lp::default()));
-    all
+    vec![
+        Box::new(EqualShare),
+        Box::new(Edf),
+        #[cfg(feature = "lp")]
+        Box::new(optimizer::Lp::default()),
+    ]
 }
 
 /// In every slot, a work-conserving schedule either uses all the capacity or gives every
