@@ -72,6 +72,25 @@ impl StepProfile {
         self.periods[0].limit_w
     }
 
+    /// The lower of the two profiles at every time from `from_secs` on, as a profile that
+    /// starts at `from_secs`.
+    pub fn pointwise_min(&self, other: &StepProfile, from_secs: i64) -> StepProfile {
+        let mut times: Vec<i64> = self
+            .breakpoints()
+            .chain(other.breakpoints())
+            .filter(|&t| t > from_secs)
+            .collect();
+        times.push(from_secs);
+        times.sort_unstable();
+        times.dedup();
+        StepProfile::from_steps(
+            from_secs,
+            times
+                .into_iter()
+                .map(|t| (t - from_secs, self.value_at(t).min(other.value_at(t)))),
+        )
+    }
+
     /// Unix times at which the limit may change: the start and every later period start.
     pub fn breakpoints(&self) -> impl Iterator<Item = i64> + '_ {
         self.periods
@@ -106,5 +125,20 @@ mod tests {
         assert_eq!(p.value_at(140), 0.0);
         assert_eq!(p.value_at(1_000_000), 0.0);
         assert_eq!(p.breakpoints().collect::<Vec<_>>(), vec![100, 120, 140]);
+    }
+
+    #[test]
+    fn pointwise_min_takes_the_lower_step() {
+        let a = StepProfile::from_steps(100, [(0, 5.0), (60, 10.0)]);
+        let b = StepProfile::from_steps(130, [(0, 8.0), (60, 2.0)]);
+        let m = a.pointwise_min(&b, 110);
+        let steps: Vec<_> = m
+            .periods
+            .iter()
+            .map(|p| (p.start_offset_secs, p.limit_w))
+            .collect();
+        // From 110: a=5,b=8 → 5; at 160: a=10,b=8 → 8; at 190: b=2 → 2.
+        assert_eq!(m.start_secs, 110);
+        assert_eq!(steps, vec![(0, 5.0), (50, 8.0), (80, 2.0)]);
     }
 }

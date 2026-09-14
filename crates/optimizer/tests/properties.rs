@@ -1,7 +1,10 @@
 //! Property tests over random instances.
 
+use std::collections::BTreeMap;
+
 use optimizer::{
-    Edf, EqualShare, EvseRef, PlanRequest, Planner, Schedule, Scheduler, SessionRequest, SiteInput,
+    ControlConfig, Edf, EqualShare, EvseLimit, EvseRef, PlanRequest, Planner, Schedule, Scheduler,
+    SessionRequest, SiteInput, StepProfile, dispatch,
 };
 use proptest::prelude::*;
 
@@ -175,6 +178,170 @@ proptest! {
             prop_assert!(values.iter().all(|&v| v >= 0.0), "negative limit at {}", t);
             let total: f64 = values.iter().sum();
             prop_assert!(total <= capacity + 1e-6 * capacity + 1e-3, "{} W > {} W at {}", total, capacity, t);
+        }
+    }
+}
+
+const T0: i64 = 1_000_000;
+const FALLBACK_W: f64 = 1_400.0;
+
+fn evse(i: usize) -> EvseRef {
+    EvseRef {
+        station_id: "st".into(),
+        evse_id: i as i32 + 1,
+    }
+}
+
+fn arb_profile(start: std::ops::RangeInclusive<i64>) -> impl Strategy<Value = StepProfile> {
+    let steps = prop::collection::vec((1..900i64, 0.0..30_000.0f64), 1..4);
+    (start, steps).prop_map(|(start, steps)| {
+        let mut offset = 0;
+        let steps = steps.into_iter().map(|(gap, limit)| {
+            let step = (offset, limit);
+            offset += gap;
+            step
+        });
+        StepProfile::from_steps(start, steps.collect::<Vec<_>>())
+    })
+}
+
+/// `now` and every later breakpoint of the profiles, plus a time far in the future.
+fn times<'a>(profiles: impl IntoIterator<Item = &'a StepProfile>) -> Vec<i64> {
+    let mut t: Vec<i64> = profiles
+        .into_iter()
+        .flat_map(|p| p.breakpoints())
+        .filter(|&t| t > T0)
+        .collect();
+    t.extend([T0, i64::MAX / 2]);
+    t.sort_unstable();
+    t.dedup();
+    t
+}
+
+fn total_at(state: &[StepProfile], t: i64) -> f64 {
+    state.iter().map(|p| p.value_at(t)).sum()
+}
+
+/// Scales `profiles` down so that, together with `fixed_w`, they never exceed `capacity_w`.
+fn fit(profiles: &mut [StepProfile], fixed_w: f64, capacity_w: f64) {
+    let peak = times(profiles.iter())
+        .into_iter()
+        .map(|t| total_at(profiles, t))
+        .fold(0.0, f64::max);
+    if peak > 0.0 && peak + fixed_w > capacity_w {
+        let scale = ((capacity_w - fixed_w) / peak).max(0.0);
+        for p in profiles.iter_mut() {
+            p.periods
+                .iter_mut()
+                .for_each(|period| period.limit_w *= scale);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ControlCase {
+    capacity_w: f64,
+    /// `None` means the EVSE is still on its fallback limit.
+    effective: Vec<Option<StepProfile>>,
+    targets: Vec<StepProfile>,
+}
+
+fn arb_control_case() -> impl Strategy<Value = ControlCase> {
+    (1..=5usize, 10_000.0..100_000.0f64).prop_flat_map(|(n, capacity_w)| {
+        let effective =
+            prop::collection::vec(prop::option::weighted(0.8, arb_profile(T0 - 600..=T0)), n);
+        let targets = prop::collection::vec(arb_profile(T0..=T0), n);
+        (effective, targets).prop_map(move |(mut effective, mut targets)| {
+            let on_fallback = effective.iter().filter(|e| e.is_none()).count() as f64 * FALLBACK_W;
+            let mut known: Vec<StepProfile> = effective.iter().flatten().cloned().collect();
+            fit(&mut known, on_fallback, capacity_w);
+            let mut known = known.into_iter();
+            for e in effective.iter_mut().filter(|e| e.is_some()) {
+                *e = known.next();
+            }
+            fit(&mut targets, 0.0, capacity_w);
+            ControlCase {
+                capacity_w,
+                effective,
+                targets,
+            }
+        })
+    })
+}
+
+proptest! {
+    /// Whatever order the stations accept the updates in, the site limit is never exceeded:
+    /// during phase 1 the total stays below the effective total, during phase 2 below the
+    /// capacity. Every change above the threshold ends up applied.
+    #[test]
+    fn dispatch_is_safe_in_any_acceptance_order(case in arb_control_case()) {
+        let n = case.targets.len();
+        let tol = 1e-6 * case.capacity_w + 1e-3;
+        let effective: BTreeMap<EvseRef, StepProfile> = case
+            .effective
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| e.clone().map(|p| (evse(i), p)))
+            .collect();
+        let targets: Vec<EvseLimit> = case
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| EvseLimit { evse: evse(i), session: format!("s{i}").as_str().into(), profile: p.clone() })
+            .collect();
+        let config = ControlConfig::default();
+        let d = dispatch(T0, case.capacity_w, &targets, &effective, FALLBACK_W, &config);
+
+        let start: Vec<StepProfile> = (0..n)
+            .map(|i| effective.get(&evse(i)).cloned().unwrap_or_else(|| StepProfile::constant(T0, FALLBACK_W)))
+            .collect();
+        let index = |e: &EvseRef| (e.evse_id - 1) as usize;
+        let all_profiles: Vec<&StepProfile> = start
+            .iter()
+            .chain(&case.targets)
+            .chain(d.phase1.iter().chain(&d.phase2).map(|u| &u.profile))
+            .collect();
+        let check_times = times(all_profiles.iter().copied());
+
+        let mut after_phase1 = start.clone();
+        for mask in 0u32..(1 << d.phase1.len()) {
+            let mut state = start.clone();
+            for (bit, u) in d.phase1.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    state[index(&u.evse)] = u.profile.clone();
+                }
+            }
+            for &t in &check_times {
+                prop_assert!(total_at(&state, t) <= total_at(&start, t) + tol, "phase 1 raised the total at {}", t);
+            }
+            after_phase1 = state;
+        }
+
+        let mut last = after_phase1.clone();
+        for mask in 0u32..(1 << d.phase2.len()) {
+            let mut state = after_phase1.clone();
+            for (bit, u) in d.phase2.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    state[index(&u.evse)] = u.profile.clone();
+                }
+            }
+            for &t in &check_times {
+                prop_assert!(total_at(&state, t) <= case.capacity_w + tol, "phase 2 exceeds capacity at {}", t);
+            }
+            last = state;
+        }
+
+        for i in 0..n {
+            let target = &case.targets[i];
+            let big_change = check_times.iter().any(|&t| {
+                let (new, eff) = (target.value_at(t), start[i].value_at(t));
+                (new - eff).abs() > config.min_change_w.max(config.rel_change * eff)
+            });
+            if big_change {
+                for &t in &check_times {
+                    prop_assert!((last[i].value_at(t) - target.value_at(t)).abs() < 1e-6, "EVSE {} not at its target", i);
+                }
+            }
         }
     }
 }
