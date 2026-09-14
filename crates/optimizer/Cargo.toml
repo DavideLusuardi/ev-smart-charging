@@ -9,3 +9,15 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+default = ["lp"]
+# The LP scheduler. Builds the HiGHS solver from source (needs cmake and a C++ compiler).
+lp = ["dep:good_lp"]
+
+[dependencies]
+good_lp = { workspace = true, optional = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
