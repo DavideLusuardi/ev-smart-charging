@@ -1,5 +1,6 @@
 # A highway fast-charging hub with DC outlets. EVs stop for 15-45 minutes and leave as soon
-# as they are full; at busy times the outlets together could draw more than the grid allows.
+# as they are full. At midday and in the evening the outlets together could draw well over
+# the grid limit, and drivers queue for a free outlet.
 name = "hub"
 
 [site]
@@ -18,21 +19,21 @@ step_secs = 10
 [arrivals]
 # Expected EVs per hour, from 00:00 to 23:00 (UTC).
 rate_per_hour = [
-    1.0, 0.5, 0.5, 0.5, 0.5, 1.0,
-    2.0, 4.0, 6.0, 7.0, 8.0, 10.0,
-    12.0, 11.0, 10.0, 10.0, 11.0, 13.0,
-    14.0, 12.0, 9.0, 6.0, 4.0, 2.0,
+    1.5, 1.0, 0.5, 0.5, 0.5, 1.5,
+    3.0, 6.0, 9.0, 10.0, 12.0, 15.0,
+    18.0, 16.0, 15.0, 15.0, 16.0, 19.0,
+    20.0, 17.0, 13.0, 9.0, 6.0, 3.0,
 ]
 weekend_factor = 1.0
 
 [ev]
 dwell_secs = { median = 1_800.0, sigma = 0.35, min = 900.0, max = 2_700.0 }
-energy_wh = { median = 35_000.0, sigma = 0.45, min = 8_000.0, max = 90_000.0 }
+energy_wh = { median = 40_000.0, sigma = 0.45, min = 8_000.0, max = 90_000.0 }
 max_power_w = [
-    { value = 50_000.0, weight = 0.10 },
-    { value = 150_000.0, weight = 0.30 },
+    { value = 50_000.0, weight = 0.05 },
+    { value = 150_000.0, weight = 0.25 },
     { value = 250_000.0, weight = 0.40 },
-    { value = 350_000.0, weight = 0.20 },
+    { value = 350_000.0, weight = 0.30 },
 ]
 iso15118_share = 0.5
 leave_when_full = true

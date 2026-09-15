@@ -265,7 +265,7 @@ mod tests {
         }
         let workplace = Scenario::load("workplace").unwrap();
         assert_eq!(workplace.evse_count(), 20);
-        assert_eq!(workplace.site.grid_limit_w, 150_000.0);
+        assert_eq!(workplace.site.grid_limit_w, 100_000.0);
         let hub = Scenario::load("hub").unwrap();
         assert_eq!(hub.evse_count(), 8);
         assert_eq!(hub.site.grid_limit_w, 1_000_000.0);

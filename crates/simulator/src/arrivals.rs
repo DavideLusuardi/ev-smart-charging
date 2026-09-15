@@ -129,10 +129,15 @@ mod tests {
     fn start_is_a_monday_midnight() {
         assert_eq!(START_SECS % DAY_SECS, 0);
         let a = &workplace().arrivals;
-        assert_eq!(rate_at(a, START_SECS + 8 * 3600), 9.0 / 3600.0);
-        // Saturday 08:00.
+        let at_eight = a.rate_per_hour[8] / 3600.0;
+        assert!(at_eight > 0.0);
+        // Monday 08:00, then Saturday 08:00.
+        assert_eq!(rate_at(a, START_SECS + 8 * 3600), at_eight);
         let saturday = START_SECS + 5 * DAY_SECS + 8 * 3600;
-        assert!((rate_at(a, saturday) - 9.0 * 0.15 / 3600.0).abs() < 1e-12);
+        assert!((rate_at(a, saturday) - at_eight * a.weekend_factor).abs() < 1e-12);
+        // Sunday counts as the weekend too, Friday doesn't.
+        assert_eq!(rate_at(a, saturday + DAY_SECS), rate_at(a, saturday));
+        assert_eq!(rate_at(a, saturday - DAY_SECS), at_eight);
     }
 
     #[test]
