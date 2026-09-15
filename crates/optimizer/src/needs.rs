@@ -5,6 +5,10 @@
 //! after its assumed departure is assumed to leave after one more slot, and an EV still
 //! charging is assumed to need at least one more slot at max power. The EV is treated as
 //! about to be done rather than dropped.
+//!
+//! An EV's own max power is learned from meter values: when an EV that isn't full draws
+//! clearly less than its limit, that draw is what it can take, so the plan stops reserving
+//! more for it (see [`observe_draw`]).
 
 use crate::types::{EvseRef, SessionId, SessionRequest, tolerance};
 
@@ -39,6 +43,8 @@ pub struct SessionState {
     /// Energy delivered so far.
     pub delivered_wh: f64,
     pub needs: Option<KnownNeeds>,
+    /// The EV's max power as learned from meter values, see [`observe_draw`].
+    pub observed_max_w: Option<f64>,
     /// The EV has stopped taking power (it is full), so it needs nothing more.
     pub ev_suspended: bool,
 }
@@ -50,7 +56,8 @@ impl SessionState {
     /// out a final partial slot. A departure at or before `now` becomes `now + slot_secs`.
     /// An EV still charging needs at least one more slot at max power when its energy is
     /// a default, and one more slot once its reported energy is reached (within the
-    /// scheduling tolerance).
+    /// scheduling tolerance). A learned max power is planned with a margin on top, so an EV
+    /// that can take more gets the chance to show it.
     pub fn request(
         &self,
         now_secs: i64,
@@ -62,6 +69,10 @@ impl SessionState {
             .needs
             .and_then(|n| n.max_power_w)
             .map_or(self.evse_max_w, |ev| ev.min(self.evse_max_w))
+            .min(
+                self.observed_max_w
+                    .map_or(f64::INFINITY, |w| w + margin_w(w)),
+            )
             .max(0.0);
 
         let departure_secs = self
@@ -99,6 +110,26 @@ impl SessionState {
     }
 }
 
+/// Updates a session's learned max power from one meter reading, taken while `limit_w`
+/// was in force. Skip readings from an EV that is suspended (full).
+///
+/// A draw clearly below the limit is what the EV can take right now, so it replaces the
+/// learned value. A draw near the limit only says the EV can take at least that much, so
+/// it raises the learned value if it is higher.
+pub fn observe_draw(observed_max_w: Option<f64>, limit_w: f64, power_w: f64) -> Option<f64> {
+    if power_w < limit_w - margin_w(limit_w) {
+        Some(power_w.max(0.0))
+    } else {
+        observed_max_w.map(|w| w.max(power_w))
+    }
+}
+
+/// How far below its limit an EV must draw to count as limiting itself: 5 % or 500 W,
+/// whichever is larger. Meter noise and small losses stay within it.
+fn margin_w(limit_w: f64) -> f64 {
+    (0.05 * limit_w).max(500.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +151,7 @@ mod tests {
             evse_max_w: 22_000.0,
             delivered_wh: 0.0,
             needs,
+            observed_max_w: None,
             ev_suspended: false,
         }
     }
@@ -211,5 +243,41 @@ mod tests {
             ..state(None)
         };
         assert_eq!(s.request(31_000, SLOT, &DEFAULTS).remaining_wh, 0.0);
+    }
+
+    #[test]
+    fn a_learned_max_is_planned_with_a_margin() {
+        let at = |observed: f64| {
+            SessionState {
+                observed_max_w: Some(observed),
+                ..state(None)
+            }
+            .request(31_000, SLOT, &DEFAULTS)
+            .max_power_w
+        };
+        assert_eq!(at(11_000.0), 11_550.0);
+        assert_eq!(at(3_000.0), 3_500.0);
+        assert_eq!(at(21_900.0), 22_000.0);
+    }
+
+    #[test]
+    fn draws_below_the_limit_teach_the_ev_max() {
+        // Drawing 11 kW on a 22 kW limit: the EV can't take more.
+        assert_eq!(observe_draw(None, 22_000.0, 11_000.0), Some(11_000.0));
+        // At the limit: nothing learned yet, or a higher floor.
+        assert_eq!(observe_draw(None, 5_000.0, 4_900.0), None);
+        assert_eq!(
+            observe_draw(Some(11_000.0), 11_550.0, 11_500.0),
+            Some(11_500.0)
+        );
+        assert_eq!(
+            observe_draw(Some(11_000.0), 8_000.0, 8_000.0),
+            Some(11_000.0)
+        );
+        // Tapering: a lower self-limited draw replaces the old value.
+        assert_eq!(
+            observe_draw(Some(11_000.0), 11_550.0, 7_000.0),
+            Some(7_000.0)
+        );
     }
 }
