@@ -13,3 +13,17 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[features]
+default = ["lp"]
+# The LP scheduler (see the optimizer crate's `lp` feature).
+lp = ["optimizer/lp"]
+
+[dependencies]
+optimizer = { path = "../optimizer", default-features = false }
+rand.workspace = true
+rand_chacha.workspace = true
+rand_distr.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
