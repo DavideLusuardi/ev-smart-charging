@@ -2,4 +2,5 @@
 
 pub mod arrivals;
 pub mod engine;
+pub mod report;
 pub mod scenario;
