@@ -23,6 +23,9 @@ use crate::profile::StepProfile;
 use crate::types::{EvseRef, SessionId, tolerance};
 
 /// When a planned change is big enough to send.
+///
+/// Starting or stopping (a change from or to 0 W) is always sent, however small: an EV held
+/// at 0 W by a small change that is never sent would never charge again.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ControlConfig {
     /// Changes of at most this many watts are not sent…
@@ -71,7 +74,8 @@ impl Dispatch {
 /// towards the total.
 ///
 /// A target is sent when it differs from the effective profile by more than the threshold at
-/// some time from `now_secs` on. If holding back the small changes would push the total over
+/// some time from `now_secs` on, or starts or stops charging at some time (one is 0 W and
+/// the other isn't). If holding back the small changes would push the total over
 /// `capacity_w` at any time, every target that differs at all is sent.
 pub fn dispatch(
     now_secs: i64,
@@ -91,6 +95,7 @@ pub fn dispatch(
         sample_times(now_secs, [new, eff]).any(|t| {
             let (n, e) = (new.value_at(t), eff.value_at(t));
             (n - e).abs() > config.min_change_w.max(config.rel_change * e)
+                || (n > ZERO_W) != (e > ZERO_W)
         })
     };
     let mut changed: Vec<bool> = targets
@@ -148,6 +153,9 @@ pub fn dispatch(
     out
 }
 
+/// Limits up to this are "not charging".
+const ZERO_W: f64 = 1e-6;
+
 /// `now` and every later time at which one of the profiles can change. Step functions are
 /// constant between these, so checking them covers all future times.
 fn sample_times<'a>(
@@ -164,7 +172,7 @@ fn sample_times<'a>(
 }
 
 fn differs(a: &StepProfile, b: &StepProfile, now_secs: i64) -> bool {
-    sample_times(now_secs, [a, b]).any(|t| (a.value_at(t) - b.value_at(t)).abs() > 1e-6)
+    sample_times(now_secs, [a, b]).any(|t| (a.value_at(t) - b.value_at(t)).abs() > ZERO_W)
 }
 
 #[cfg(test)]
@@ -269,6 +277,33 @@ mod tests {
         let tight = run(60_000.0, &targets, &eff);
         assert_eq!(ids(&tight.phase1), vec![1]);
         assert_eq!(ids(&tight.phase2), vec![2]);
+    }
+
+    /// A remainder of a few Wh plans a few hundred W. Held back by the threshold, the EV
+    /// would sit at 0 W for good.
+    #[test]
+    fn starting_or_stopping_is_always_sent() {
+        let d = run(
+            100_000.0,
+            &[target(1, &[(0, 172.0)])],
+            &effective(&[(1, 0.0)]),
+        );
+        assert_eq!(ids(&d.phase2), vec![1]);
+
+        let d = run(
+            100_000.0,
+            &[target(1, &[(0, 0.0)])],
+            &effective(&[(1, 500.0)]),
+        );
+        assert_eq!(ids(&d.phase1), vec![1]);
+
+        // Stopping later counts too.
+        let d = run(
+            100_000.0,
+            &[target(1, &[(0, 500.0), (300, 0.0)])],
+            &effective(&[(1, 500.0)]),
+        );
+        assert_eq!(ids(&d.phase1), vec![1]);
     }
 
     #[test]
