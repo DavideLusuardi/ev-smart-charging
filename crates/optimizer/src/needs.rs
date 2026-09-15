@@ -1,12 +1,12 @@
 //! What each session still needs, as far as the controller can tell.
 //!
 //! ISO 15118 EVs report their departure time and energy. For the others the controller
-//! assumes site defaults. When an EV outlives an estimate (still plugged in after the
-//! assumed departure, or still charging after the assumed energy), the estimate is rolled
-//! forward by one slot at a time, so the EV is treated as about to be done rather than
-//! dropped.
+//! assumes site defaults, and rolls them forward one slot at a time: an EV still plugged in
+//! after its assumed departure is assumed to leave after one more slot, and an EV still
+//! charging is assumed to need at least one more slot at max power. The EV is treated as
+//! about to be done rather than dropped.
 
-use crate::types::{EvseRef, SessionId, SessionRequest};
+use crate::types::{EvseRef, SessionId, SessionRequest, tolerance};
 
 /// Assumptions for EVs that don't report their needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -48,8 +48,9 @@ impl SessionState {
     ///
     /// The departure slot is `floor(departure / slot_secs)`, an exclusive end that leaves
     /// out a final partial slot. A departure at or before `now` becomes `now + slot_secs`.
-    /// Remaining energy of zero or less, on an EV still charging, becomes one slot at max
-    /// power.
+    /// An EV still charging needs at least one more slot at max power when its energy is
+    /// a default, and one more slot once its reported energy is reached (within the
+    /// scheduling tolerance).
     pub fn request(
         &self,
         now_secs: i64,
@@ -74,13 +75,18 @@ impl SessionState {
             departure_secs
         };
 
-        let energy_wh = self.needs.map_or(defaults.energy_wh, |n| n.energy_wh);
-        let remaining_wh = if self.ev_suspended {
-            0.0
-        } else if energy_wh - self.delivered_wh <= 0.0 {
-            max_power_w * f64::from(slot_secs) / 3600.0
-        } else {
-            energy_wh - self.delivered_wh
+        let one_slot_wh = max_power_w * f64::from(slot_secs) / 3600.0;
+        let remaining_wh = match self.needs {
+            _ if self.ev_suspended => 0.0,
+            // Reported energy is trusted until it runs out.
+            Some(n) if n.energy_wh - self.delivered_wh > tolerance(n.energy_wh) => {
+                n.energy_wh - self.delivered_wh
+            }
+            Some(_) => one_slot_wh,
+            // A default is only a guess. Rolling it forward just before it runs out, not
+            // after, matters: a remainder of a few Wh plans a few hundred W, which the
+            // dispatch threshold may never send, so the EV would stall short of the guess.
+            None => (defaults.energy_wh - self.delivered_wh).max(one_slot_wh),
         };
 
         SessionRequest {
@@ -166,6 +172,32 @@ mod tests {
         let s = SessionState {
             delivered_wh: 10_000.0,
             ..state(None)
+        };
+        let r = s.request(31_000, SLOT, &DEFAULTS);
+        assert!((r.remaining_wh - 22_000.0 * 300.0 / 3600.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_default_energy_rolls_forward_before_it_runs_out() {
+        let s = SessionState {
+            delivered_wh: 9_990.0,
+            ..state(None)
+        };
+        let r = s.request(31_000, SLOT, &DEFAULTS);
+        assert!((r.remaining_wh - 22_000.0 * 300.0 / 3600.0).abs() < 1e-9);
+    }
+
+    /// Delivering exactly the reported energy can leave float noise; that counts as
+    /// reached.
+    #[test]
+    fn reported_energy_rolls_forward_despite_rounding() {
+        let s = SessionState {
+            delivered_wh: 30_000.0 - 1e-9,
+            ..state(Some(KnownNeeds {
+                departure_secs: 40_000,
+                energy_wh: 30_000.0,
+                max_power_w: None,
+            }))
         };
         let r = s.request(31_000, SLOT, &DEFAULTS);
         assert!((r.remaining_wh - 22_000.0 * 300.0 / 3600.0).abs() < 1e-9);
