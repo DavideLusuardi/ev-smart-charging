@@ -2,7 +2,7 @@
 //!
 //! ISO 15118 EVs report their departure time and energy. For the others the controller
 //! assumes site defaults, and rolls them forward one slot at a time: an EV still plugged in
-//! after its assumed departure is assumed to leave after one more slot, and an EV still
+//! when its assumed departure comes is assumed to leave after one more slot, and an EV still
 //! charging is assumed to need at least one more slot at max power. The EV is treated as
 //! about to be done rather than dropped.
 //!
@@ -53,7 +53,8 @@ impl SessionState {
     /// The scheduler input for this session at `now_secs`.
     ///
     /// The departure slot is `floor(departure / slot_secs)`, an exclusive end that leaves
-    /// out a final partial slot. A departure at or before `now` becomes `now + slot_secs`.
+    /// out a final partial slot, but never before the end of the current slot: an EV that
+    /// is still plugged in can always charge now.
     /// An EV still charging needs at least one more slot at max power when its energy is
     /// a default, and one more slot once its reported energy is reached (within the
     /// scheduling tolerance). A learned max power is planned with a margin on top, so an EV
@@ -80,11 +81,9 @@ impl SessionState {
             .map_or(self.started_secs + defaults.dwell_secs, |n| {
                 n.departure_secs
             });
-        let departure_secs = if departure_secs <= now_secs {
-            now_secs + slot
-        } else {
-            departure_secs
-        };
+        let departure = departure_secs
+            .div_euclid(slot)
+            .max(now_secs.div_euclid(slot) + 1);
 
         let one_slot_wh = max_power_w * f64::from(slot_secs) / 3600.0;
         let remaining_wh = match self.needs {
@@ -103,7 +102,7 @@ impl SessionState {
         SessionRequest {
             id: self.id.clone(),
             evse: self.evse.clone(),
-            departure: departure_secs.div_euclid(slot),
+            departure,
             remaining_wh,
             max_power_w,
         }
@@ -196,7 +195,21 @@ mod tests {
         // The default departure is 33_600; at 33_700 the EV is still there.
         let r = state(None).request(33_700, SLOT, &DEFAULTS);
         assert_eq!(r.departure, 33_700 / 300 + 1);
-        assert_eq!(r.departure, (33_700 + 300) / 300);
+    }
+
+    /// A departure inside the current slot would round down to the current slot and leave
+    /// the EV at 0 W until the next plan, though it is still plugged in.
+    #[test]
+    fn an_ev_can_charge_in_the_slot_it_leaves_in() {
+        let s = SessionState {
+            started_secs: 30_010,
+            ..state(None)
+        };
+        // Assumed departure 33_610, in slot 112 (33_600..33_900).
+        let r = s.request(33_600, SLOT, &DEFAULTS);
+        assert_eq!(r.departure, 113);
+        // Earlier, the partial final slot is still left out.
+        assert_eq!(s.request(33_000, SLOT, &DEFAULTS).departure, 112);
     }
 
     #[test]
