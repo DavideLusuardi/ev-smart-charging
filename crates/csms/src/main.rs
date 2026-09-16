@@ -1,5 +1,6 @@
 //! The `csms` binary.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -16,9 +17,16 @@ struct Cli {
     /// Address for the OCPP WebSocket endpoint.
     #[arg(long, default_value = "0.0.0.0:9000")]
     listen: SocketAddr,
+    /// Heartbeat interval given to stations at boot, in seconds.
+    #[arg(long, default_value_t = 300)]
+    heartbeat_interval: u64,
     /// Seconds a station has to answer a CALL from the CSMS.
     #[arg(long, default_value_t = 30)]
     call_timeout: u64,
+    /// Accept only this id token in Authorize (repeat for more). Without it, every token is
+    /// accepted.
+    #[arg(long = "allow-id-token", value_name = "TOKEN")]
+    allowed_id_tokens: Vec<String>,
 }
 
 #[tokio::main]
@@ -28,8 +36,12 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
 
+    let id_token_allowlist =
+        (!cli.allowed_id_tokens.is_empty()).then(|| HashSet::from_iter(cli.allowed_id_tokens));
     let state = AppState::new(Config {
+        heartbeat_interval: Duration::from_secs(cli.heartbeat_interval),
         call_timeout: Duration::from_secs(cli.call_timeout),
+        id_token_allowlist,
         ..Config::default()
     });
     let listener = TcpListener::bind(cli.listen)

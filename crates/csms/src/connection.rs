@@ -12,7 +12,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ocpp::{Frame, MessageId};
+use ocpp::{DateTime, Frame, MessageId};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
@@ -39,6 +39,8 @@ pub(crate) async fn serve(
         .register(station.clone(), StationHandle::new(calls_tx));
     info!("station connected");
     let connection = Connection {
+        state: state.clone(),
+        station: station.clone(),
         outgoing,
         calls,
         pending: None,
@@ -50,6 +52,8 @@ pub(crate) async fn serve(
 }
 
 struct Connection {
+    state: Arc<AppState>,
+    station: StationId,
     outgoing: mpsc::Sender<String>,
     /// CALLs waiting to be sent to the station.
     calls: mpsc::Receiver<OutboundCall>,
@@ -95,6 +99,9 @@ impl Connection {
     }
 
     async fn on_text(&mut self, text: &str) -> ControlFlow<()> {
+        // Any frame, even a broken one, shows the station is alive.
+        let now = DateTime::now();
+        self.state.site().touch(&self.station, now);
         match Frame::parse(text) {
             Err(e) => {
                 warn!(error = %e, "malformed frame");
@@ -111,7 +118,13 @@ impl Connection {
                 debug!(%id, %action, "call from station");
                 // Handlers run inline on this task, so a handler must never wait for a CALL
                 // on its own connection: the response could only be read by this task.
-                self.send(handlers::handle(id, &action, payload)).await
+                let reply = {
+                    let mut site = self.state.site();
+                    // Same timestamp as above; `touch` just hands back the station.
+                    let station = site.touch(&self.station, now);
+                    handlers::handle(&self.state.config, station, id, &action, payload)
+                };
+                self.send(reply).await
             }
             Ok(response) => {
                 self.on_response(response);
