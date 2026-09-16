@@ -12,9 +12,11 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["ws"] }
 chrono = { version = "0.4.45", default-features = false, features = ["now", "serde", "std"] }
 clap = { version = "4.6.7", features = ["derive"] }
 csv = "1.4.0"
+futures-util = "0.3.34"
 good_lp = { version = "1.15.3", default-features = false, features = ["highs"] }
 jsonschema = { version = "0.58.1", default-features = false }
 proptest = "1.11.0"
@@ -24,7 +26,12 @@ rand_distr = "0.6.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.21"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# Same major as axum's own WebSocket dependency, so only one copy is built.
+tokio-tungstenite = "0.29.0"
 toml = "1.1.6"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.26.1", features = ["v4"] }
 
 [workspace.lints.rust]
