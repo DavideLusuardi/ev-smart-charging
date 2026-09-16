@@ -1,0 +1,43 @@
+# An office car park with AC chargers and long commutes. Most EVs arrive between 7 and 9
+# and stay the working day, some only a few hours. The grid connection, about 5 kW per
+# EVSE, can't charge the morning arrivals at full power at once.
+name = "workplace"
+
+[site]
+stations = 10
+evses_per_station = 2
+evse_max_w = 22_000.0
+grid_limit_w = 100_000.0
+fallback_limit_w = 1_400.0
+
+[control]
+slot_secs = 300
+max_horizon_slots = 144 # 12 h
+tick_secs = 300
+step_secs = 10
+
+[arrivals]
+# Expected EVs per hour on weekdays, from 00:00 to 23:00 (UTC).
+rate_per_hour = [
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.5, 4.0, 8.0, 3.0, 1.0, 0.5,
+    0.5, 0.5, 0.3, 0.2, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+]
+weekend_factor = 0.15
+
+[ev]
+dwell_secs = { median = 28_800.0, sigma = 0.5, min = 3_600.0, max = 39_600.0 }
+energy_wh = { median = 28_000.0, sigma = 0.4, min = 5_000.0, max = 70_000.0 }
+max_power_w = [
+    { value = 7_400.0, weight = 0.15 },  # single-phase 32 A
+    { value = 11_000.0, weight = 0.45 }, # three-phase 16 A
+    { value = 22_000.0, weight = 0.40 }, # three-phase 32 A
+]
+iso15118_share = 0.3
+leave_when_full = false
+max_wait_secs = 1_800
+
+[defaults]
+dwell_secs = 28_800 # 8 h
+energy_wh = 20_000.0

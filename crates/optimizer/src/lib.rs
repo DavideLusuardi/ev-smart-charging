@@ -8,6 +8,7 @@ pub mod edf;
 pub mod equal_share;
 #[cfg(feature = "lp")]
 pub mod lp;
+pub mod needs;
 pub mod planner;
 pub mod profile;
 pub mod types;
@@ -17,6 +18,7 @@ pub use edf::Edf;
 pub use equal_share::EqualShare;
 #[cfg(feature = "lp")]
 pub use lp::Lp;
+pub use needs::{KnownNeeds, NeedsDefaults, SessionState, observe_draw};
 pub use planner::{EvseLimit, Plan, PlanRequest, Planner};
 pub use profile::{Period, StepProfile};
 pub use types::{
