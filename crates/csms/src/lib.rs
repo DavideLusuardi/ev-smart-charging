@@ -5,16 +5,19 @@
 //! keeps track of which stations are connected.
 
 mod connection;
+pub mod handle;
 mod handlers;
 pub mod registry;
 pub mod station_id;
 mod ws;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::routing::get;
 
+pub use handle::{CallError, StationHandle};
 pub use registry::Registry;
 pub use station_id::StationId;
 
@@ -22,8 +25,22 @@ pub use station_id::StationId;
 pub const SUBPROTOCOL: &str = "ocpp2.0.1";
 
 /// Server settings.
-#[derive(Debug, Clone, Default)]
-pub struct Config {}
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// How long a station has to answer a CALL.
+    pub call_timeout: Duration,
+    /// CALLs that can wait per connection while one is in flight; senders wait beyond that.
+    pub call_queue_len: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            call_timeout: Duration::from_secs(30),
+            call_queue_len: 32,
+        }
+    }
+}
 
 /// State shared by every connection and the HTTP handlers.
 #[derive(Debug)]

@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::oneshot;
 
+use crate::handle::StationHandle;
 use crate::station_id::StationId;
 
 /// Connected stations.
@@ -22,6 +23,7 @@ pub struct Registry {
 #[derive(Debug)]
 struct Entry {
     generation: u64,
+    handle: StationHandle,
     /// Dropping the entry drops this sender, which stops the connection.
     _stop: oneshot::Sender<()>,
 }
@@ -37,11 +39,12 @@ pub(crate) struct Registration {
 
 impl Registry {
     /// Registers a new connection for `id`, stopping any previous one.
-    pub(crate) fn register(&self, id: StationId) -> Registration {
+    pub(crate) fn register(&self, id: StationId, handle: StationHandle) -> Registration {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let (stop_tx, stop) = oneshot::channel();
         let entry = Entry {
             generation,
+            handle,
             _stop: stop_tx,
         };
         let previous = self.write().insert(id, entry);
@@ -55,6 +58,11 @@ impl Registry {
         if entries.get(id).is_some_and(|e| e.generation == generation) {
             entries.remove(id);
         }
+    }
+
+    /// The handle for sending CALLs to a connected station.
+    pub fn get(&self, id: &StationId) -> Option<StationHandle> {
+        self.read().get(id).map(|e| e.handle.clone())
     }
 
     /// Whether a station is connected.
@@ -87,13 +95,17 @@ mod tests {
         StationId::try_from(s).unwrap()
     }
 
+    fn handle() -> StationHandle {
+        StationHandle::new(tokio::sync::mpsc::channel(1).0)
+    }
+
     #[test]
     fn reconnect_stops_the_old_connection() {
         let registry = Registry::default();
-        let mut first = registry.register(id("CS1"));
+        let mut first = registry.register(id("CS1"), handle());
         assert_eq!(first.stop.try_recv(), Err(TryRecvError::Empty));
 
-        let second = registry.register(id("CS1"));
+        let second = registry.register(id("CS1"), handle());
         assert_eq!(first.stop.try_recv(), Err(TryRecvError::Closed));
 
         // The old connection cleaning up must not remove the new one.
@@ -106,8 +118,8 @@ mod tests {
     #[test]
     fn lists_connected_stations_sorted() {
         let registry = Registry::default();
-        let _b = registry.register(id("B"));
-        let _a = registry.register(id("A"));
+        let _b = registry.register(id("B"), handle());
+        let _a = registry.register(id("A"), handle());
         assert_eq!(registry.connected(), vec![id("A"), id("B")]);
     }
 }
