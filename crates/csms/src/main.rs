@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use csms::{AppState, Config};
+use csms::{AppState, Config, SiteConfig};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -27,6 +27,15 @@ struct Cli {
     /// accepted.
     #[arg(long = "allow-id-token", value_name = "TOKEN")]
     allowed_id_tokens: Vec<String>,
+    /// The site's grid limit, in W.
+    #[arg(long, default_value_t = SiteConfig::default().grid_limit_w)]
+    grid_limit_w: f64,
+    /// The rating of every EVSE, in W.
+    #[arg(long, default_value_t = SiteConfig::default().evse_max_w)]
+    evse_max_w: f64,
+    /// What an EVSE may draw before it has a plan (its TxDefaultProfile), in W.
+    #[arg(long, default_value_t = SiteConfig::default().fallback_limit_w)]
+    fallback_limit_w: f64,
 }
 
 #[tokio::main]
@@ -42,6 +51,11 @@ async fn main() -> Result<()> {
         heartbeat_interval: Duration::from_secs(cli.heartbeat_interval),
         call_timeout: Duration::from_secs(cli.call_timeout),
         id_token_allowlist,
+        site: SiteConfig {
+            grid_limit_w: cli.grid_limit_w,
+            evse_max_w: cli.evse_max_w,
+            fallback_limit_w: cli.fallback_limit_w,
+        },
         ..Config::default()
     });
     let listener = TcpListener::bind(cli.listen)

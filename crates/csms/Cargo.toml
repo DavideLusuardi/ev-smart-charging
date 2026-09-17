@@ -10,12 +10,19 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["lp"]
+# The LP scheduler (see the optimizer crate's `lp` feature).
+lp = ["optimizer/lp"]
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+chrono.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 ocpp = { path = "../ocpp" }
+optimizer = { path = "../optimizer", default-features = false }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

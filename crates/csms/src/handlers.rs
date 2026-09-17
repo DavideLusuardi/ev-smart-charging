@@ -10,54 +10,89 @@ use ocpp::messages::boot_notification::{
 };
 use ocpp::messages::heartbeat::HeartbeatResponse;
 use ocpp::messages::status_notification::{StatusNotificationRequest, StatusNotificationResponse};
-use ocpp::types::{AuthorizationStatus, IdTokenInfo};
+use ocpp::types::{AuthorizationStatus, IdToken, IdTokenInfo};
 use ocpp::{DateTime, ErrorCode, Frame, MessageId, StationRequest};
 use serde_json::Value;
 use tracing::info;
 
 use crate::Config;
-use crate::state::{StationInfo, StationState};
+use crate::state::{SiteState, StationInfo, StationState};
+use crate::station_id::StationId;
+use crate::transactions;
 
-/// Answers one CALL from `station` with a CALLRESULT or a CALLERROR.
+/// The answer to one CALL, and what it changed.
+#[derive(Debug)]
+pub(crate) struct Handled {
+    /// The CALLRESULT or CALLERROR to send back.
+    pub reply: Frame,
+    /// Something changed that calls for a new plan.
+    pub replan: bool,
+}
+
+impl Handled {
+    fn reply(reply: Frame) -> Self {
+        Self {
+            reply,
+            replan: false,
+        }
+    }
+}
+
+/// Answers one CALL from `station`, received at `now`.
 pub(crate) fn handle(
     config: &Config,
-    station: &mut StationState,
+    site: &mut SiteState,
+    station: &StationId,
+    now: DateTime,
     id: MessageId,
     action: &str,
     payload: Value,
-) -> Frame {
+) -> Handled {
     let request = match StationRequest::decode(action, payload) {
         Ok(request) => request,
-        Err(e) => return Frame::call_error(id, e.code, e.message),
+        Err(e) => return Handled::reply(Frame::call_error(id, e.code, e.message)),
     };
     match request {
         StationRequest::BootNotification(req) => {
-            Frame::call_result(id, &boot_notification(config, station, &req))
+            let response = boot_notification(config, site.touch(station, now), now, &req);
+            Handled::reply(Frame::call_result(id, &response))
         }
-        StationRequest::Heartbeat(_) => Frame::call_result(
+        StationRequest::Heartbeat(_) => Handled::reply(Frame::call_result(
             id,
             &HeartbeatResponse {
                 custom_data: None,
-                current_time: DateTime::now(),
+                current_time: now,
             },
-        ),
+        )),
         StationRequest::StatusNotification(req) => {
-            Frame::call_result(id, &status_notification(station, &req))
+            let new_evse = status_notification(site.touch(station, now), &req);
+            Handled {
+                reply: Frame::call_result(id, &StatusNotificationResponse::default()),
+                replan: new_evse,
+            }
         }
-        StationRequest::Authorize(req) => Frame::call_result(id, &authorize(config, &req)),
-        StationRequest::TransactionEvent(_) | StationRequest::NotifyEvChargingNeeds(_) => {
-            Frame::call_error(
-                id,
-                ErrorCode::NotSupported,
-                format!("{} is not handled yet", request.action()),
-            )
+        StationRequest::Authorize(req) => {
+            Handled::reply(Frame::call_result(id, &authorize(config, &req)))
         }
+        StationRequest::TransactionEvent(req) => {
+            let (response, replan) = transactions::transaction_event(config, site, station, &req);
+            Handled {
+                reply: Frame::call_result(id, &response),
+                replan,
+            }
+        }
+        StationRequest::NotifyEvChargingNeeds(_) => Handled::reply(Frame::call_error(
+            id,
+            ErrorCode::NotSupported,
+            format!("{} is not handled yet", request.action()),
+        )),
     }
 }
 
 fn boot_notification(
     config: &Config,
     station: &mut StationState,
+    now: DateTime,
     req: &BootNotificationRequest,
 ) -> BootNotificationResponse {
     let info = StationInfo::from(&req.charging_station);
@@ -70,28 +105,37 @@ fn boot_notification(
     station.info = Some(info);
     BootNotificationResponse {
         custom_data: None,
-        current_time: DateTime::now(),
+        current_time: now,
         interval: i32::try_from(config.heartbeat_interval.as_secs()).unwrap_or(i32::MAX),
         status: RegistrationStatus::Accepted,
         status_info: None,
     }
 }
 
-fn status_notification(
-    station: &mut StationState,
-    req: &StatusNotificationRequest,
-) -> StatusNotificationResponse {
+/// Records a connector's status. Returns whether the EVSE is new: each idle EVSE has
+/// capacity reserved for it, so the plan changes.
+fn status_notification(station: &mut StationState, req: &StatusNotificationRequest) -> bool {
+    let new_evse = !station.evses.contains_key(&req.evse_id);
     station
         .evses
         .entry(req.evse_id)
         .or_default()
         .connectors
         .insert(req.connector_id, req.connector_status);
-    StatusNotificationResponse::default()
+    new_evse
 }
 
 fn authorize(config: &Config, req: &AuthorizeRequest) -> AuthorizeResponse {
-    let token = req.id_token.id_token.as_str();
+    AuthorizeResponse {
+        custom_data: None,
+        id_token_info: id_token_info(config, &req.id_token),
+        certificate_status: None,
+    }
+}
+
+/// Accepts a token if there is no allowlist or it is on it.
+pub(crate) fn id_token_info(config: &Config, id_token: &IdToken) -> IdTokenInfo {
+    let token = id_token.id_token.as_str();
     let accepted = config
         .id_token_allowlist
         .as_ref()
@@ -102,51 +146,61 @@ fn authorize(config: &Config, req: &AuthorizeRequest) -> AuthorizeResponse {
         info!(token, "id token not on the allowlist");
         AuthorizationStatus::Invalid
     };
-    AuthorizeResponse {
+    IdTokenInfo {
         custom_data: None,
-        id_token_info: IdTokenInfo {
-            custom_data: None,
-            status,
-            cache_expiry_date_time: None,
-            charging_priority: None,
-            language1: None,
-            evse_id: None,
-            group_id_token: None,
-            language2: None,
-            personal_message: None,
-        },
-        certificate_status: None,
+        status,
+        cache_expiry_date_time: None,
+        charging_priority: None,
+        language1: None,
+        evse_id: None,
+        group_id_token: None,
+        language2: None,
+        personal_message: None,
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ocpp::messages::status_notification::ConnectorStatus;
     use serde_json::json;
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::HashSet;
     use std::time::Duration;
 
-    fn new_station() -> StationState {
-        StationState {
-            info: None,
-            last_seen: DateTime::now(),
-            evses: BTreeMap::new(),
-        }
+    pub(crate) fn new_site() -> SiteState {
+        SiteState::new(100_000.0)
+    }
+
+    pub(crate) fn cs1() -> StationId {
+        StationId::try_from("CS1").unwrap()
+    }
+
+    /// Runs one CALL from CS1.
+    pub(crate) fn run(
+        config: &Config,
+        site: &mut SiteState,
+        action: &str,
+        payload: Value,
+    ) -> Handled {
+        let id = MessageId::try_from("1").unwrap();
+        handle(config, site, &cs1(), DateTime::now(), id, action, payload)
     }
 
     /// Runs one CALL and returns the CALLRESULT payload, failing on a CALLERROR.
-    fn call(config: &Config, station: &mut StationState, action: &str, payload: Value) -> Value {
-        let id = MessageId::try_from("1").unwrap();
-        match handle(config, station, id, action, payload) {
+    pub(crate) fn call(
+        config: &Config,
+        site: &mut SiteState,
+        action: &str,
+        payload: Value,
+    ) -> Value {
+        match run(config, site, action, payload).reply {
             Frame::CallResult { payload, .. } => payload,
             other => panic!("expected a CALLRESULT, got {other:?}"),
         }
     }
 
-    fn call_error(station: &mut StationState, action: &str, payload: Value) -> ErrorCode {
-        let id = MessageId::try_from("1").unwrap();
-        match handle(&Config::default(), station, id, action, payload) {
+    fn call_error(site: &mut SiteState, action: &str, payload: Value) -> ErrorCode {
+        match run(&Config::default(), site, action, payload).reply {
             Frame::CallError { code, .. } => code,
             other => panic!("expected a CALLERROR, got {other:?}"),
         }
@@ -154,7 +208,7 @@ mod tests {
 
     fn authorize_status(config: &Config, token: &str) -> Value {
         let payload = json!({ "idToken": { "idToken": token, "type": "ISO14443" } });
-        call(config, &mut new_station(), "Authorize", payload)["idTokenInfo"]["status"].clone()
+        call(config, &mut new_site(), "Authorize", payload)["idTokenInfo"]["status"].clone()
     }
 
     #[test]
@@ -163,7 +217,7 @@ mod tests {
             heartbeat_interval: Duration::from_secs(120),
             ..Config::default()
         };
-        let mut station = new_station();
+        let mut site = new_site();
         let payload = json!({
             "chargingStation": {
                 "model": "Wallbox 22",
@@ -172,12 +226,12 @@ mod tests {
             },
             "reason": "PowerUp"
         });
-        let response = call(&config, &mut station, "BootNotification", payload);
+        let response = call(&config, &mut site, "BootNotification", payload);
         assert_eq!(response["status"], "Accepted");
         assert_eq!(response["interval"], 120);
         assert!(response["currentTime"].is_string());
         assert_eq!(
-            station.info,
+            site.station(&cs1()).unwrap().info,
             Some(StationInfo {
                 vendor: "Acme".into(),
                 model: "Wallbox 22".into(),
@@ -189,36 +243,33 @@ mod tests {
 
     #[test]
     fn heartbeat_returns_the_current_time() {
-        let response = call(
-            &Config::default(),
-            &mut new_station(),
-            "Heartbeat",
-            json!({}),
-        );
+        let response = call(&Config::default(), &mut new_site(), "Heartbeat", json!({}));
         let time: DateTime = ocpp::decode(response["currentTime"].clone()).unwrap();
         assert!((*DateTime::now() - *time).num_seconds() < 5);
     }
 
     #[test]
     fn status_notification_tracks_connectors_per_evse() {
-        let mut station = new_station();
-        for (evse, connector, status) in
-            [(1, 1, "Available"), (2, 1, "Occupied"), (1, 1, "Faulted")]
-        {
+        let mut site = new_site();
+        for (evse, connector, status, new_evse) in [
+            (1, 1, "Available", true),
+            (2, 1, "Occupied", true),
+            (1, 1, "Faulted", false),
+        ] {
             let payload = json!({
                 "timestamp": "2026-09-30T08:00:00Z",
                 "connectorStatus": status,
                 "evseId": evse,
                 "connectorId": connector
             });
-            let response = call(
-                &Config::default(),
-                &mut station,
-                "StatusNotification",
-                payload,
+            let handled = run(&Config::default(), &mut site, "StatusNotification", payload);
+            assert!(
+                matches!(&handled.reply, Frame::CallResult { payload, .. } if *payload == json!({}))
             );
-            assert_eq!(response, json!({}));
+            // Each new EVSE gets capacity reserved, so the plan must change.
+            assert_eq!(handled.replan, new_evse);
         }
+        let station = site.station(&cs1()).unwrap();
         assert_eq!(station.evses[&1].connectors[&1], ConnectorStatus::Faulted);
         assert_eq!(station.evses[&2].connectors[&1], ConnectorStatus::Occupied);
     }
@@ -239,39 +290,18 @@ mod tests {
     }
 
     #[test]
-    fn transaction_messages_are_not_handled_yet() {
-        let fixtures = [
-            (
-                "TransactionEvent",
-                include_str!("../../ocpp/tests/fixtures/TransactionEventRequest.started.json"),
-            ),
-            (
-                "NotifyEVChargingNeeds",
-                include_str!("../../ocpp/tests/fixtures/NotifyEVChargingNeedsRequest.dc.json"),
-            ),
-        ];
-        for (action, fixture) in fixtures {
-            let payload = serde_json::from_str(fixture).unwrap();
-            assert_eq!(
-                call_error(&mut new_station(), action, payload),
-                ErrorCode::NotSupported
-            );
-        }
-    }
-
-    #[test]
     fn invalid_payloads_and_unknown_actions_get_call_errors() {
-        let mut station = new_station();
+        let mut site = new_site();
         assert_eq!(
-            call_error(&mut station, "StatusNotification", json!({ "evseId": 1 })),
+            call_error(&mut site, "StatusNotification", json!({ "evseId": 1 })),
             ErrorCode::OccurrenceConstraintViolation
         );
         assert_eq!(
-            call_error(&mut station, "DataTransfer", json!({})),
+            call_error(&mut site, "DataTransfer", json!({})),
             ErrorCode::NotImplemented
         );
         assert_eq!(
-            call_error(&mut station, "SetChargingProfile", json!({})),
+            call_error(&mut site, "SetChargingProfile", json!({})),
             ErrorCode::NotSupported
         );
     }

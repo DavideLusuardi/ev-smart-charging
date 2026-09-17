@@ -2,15 +2,18 @@
 //!
 //! Stations connect to `ws://host:port/ocpp/{stationId}` with the `ocpp2.0.1` subprotocol.
 //! Each connection runs as its own actor task (see `connection`), and the [`Registry`]
-//! keeps track of which stations are connected. What the stations report is kept in the
-//! [`SiteState`].
+//! keeps track of which stations are connected. What the stations report, including the
+//! sessions in progress, is kept in the [`SiteState`].
 
+pub mod clock;
 mod connection;
 pub mod handle;
 mod handlers;
+mod meter;
 pub mod registry;
 pub mod state;
 pub mod station_id;
+mod transactions;
 mod ws;
 
 use std::collections::HashSet;
@@ -19,7 +22,9 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::routing::get;
+use tokio::sync::Notify;
 
+pub use clock::Clock;
 pub use handle::{CallError, StationHandle};
 pub use registry::Registry;
 pub use state::SiteState;
@@ -39,6 +44,28 @@ pub struct Config {
     pub call_queue_len: usize,
     /// Id tokens that `Authorize` accepts; `None` accepts every token.
     pub id_token_allowlist: Option<HashSet<String>>,
+    pub site: SiteConfig,
+}
+
+/// The site's electrical setup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SiteConfig {
+    /// The grid limit at startup.
+    pub grid_limit_w: f64,
+    /// The rating of every EVSE.
+    pub evse_max_w: f64,
+    /// The TxDefaultProfile limit: what an EVSE may draw without a plan.
+    pub fallback_limit_w: f64,
+}
+
+impl Default for SiteConfig {
+    fn default() -> Self {
+        Self {
+            grid_limit_w: 100_000.0,
+            evse_max_w: 22_000.0,
+            fallback_limit_w: 1_400.0,
+        }
+    }
 }
 
 impl Default for Config {
@@ -48,6 +75,7 @@ impl Default for Config {
             call_timeout: Duration::from_secs(30),
             call_queue_len: 32,
             id_token_allowlist: None,
+            site: SiteConfig::default(),
         }
     }
 }
@@ -57,15 +85,24 @@ impl Default for Config {
 pub struct AppState {
     pub config: Config,
     pub registry: Registry,
+    pub clock: Clock,
     site: Mutex<SiteState>,
+    /// Woken when something changed that calls for a new plan.
+    pub(crate) replan: Notify,
 }
 
 impl AppState {
     pub fn new(config: Config) -> Arc<Self> {
+        Self::with_clock(config, Clock::new())
+    }
+
+    pub fn with_clock(config: Config, clock: Clock) -> Arc<Self> {
         Arc::new(Self {
+            site: Mutex::new(SiteState::new(config.site.grid_limit_w)),
             config,
             registry: Registry::default(),
-            site: Mutex::default(),
+            clock,
+            replan: Notify::new(),
         })
     }
 

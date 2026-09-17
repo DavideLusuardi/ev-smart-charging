@@ -12,7 +12,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ocpp::{DateTime, Frame, MessageId};
+use ocpp::{Frame, MessageId};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
@@ -49,6 +49,8 @@ pub(crate) async fn serve(
     connection.run(incoming, registration.stop).await;
     state.registry.unregister(&station, registration.generation);
     info!("station disconnected");
+    // Its sessions can no longer be steered, so the others must plan around them.
+    state.replan.notify_one();
 }
 
 struct Connection {
@@ -100,7 +102,7 @@ impl Connection {
 
     async fn on_text(&mut self, text: &str) -> ControlFlow<()> {
         // Any frame, even a broken one, shows the station is alive.
-        let now = DateTime::now();
+        let now = self.state.clock.now();
         self.state.site().touch(&self.station, now);
         match Frame::parse(text) {
             Err(e) => {
@@ -118,13 +120,20 @@ impl Connection {
                 debug!(%id, %action, "call from station");
                 // Handlers run inline on this task, so a handler must never wait for a CALL
                 // on its own connection: the response could only be read by this task.
-                let reply = {
-                    let mut site = self.state.site();
-                    // Same timestamp as above; `touch` just hands back the station.
-                    let station = site.touch(&self.station, now);
-                    handlers::handle(&self.state.config, station, id, &action, payload)
-                };
-                self.send(reply).await
+                let handled = handlers::handle(
+                    &self.state.config,
+                    &mut self.state.site(),
+                    &self.station,
+                    now,
+                    id,
+                    &action,
+                    payload,
+                );
+                let flow = self.send(handled.reply).await;
+                if handled.replan {
+                    self.state.replan.notify_one();
+                }
+                flow
             }
             Ok(response) => {
                 self.on_response(response);
