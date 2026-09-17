@@ -21,6 +21,17 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+## Running the CSMS
+
+```sh
+cargo run -p csms -- --listen 0.0.0.0:9000
+```
+
+Stations connect to `ws://localhost:9000/ocpp/{stationId}` with the `ocpp2.0.1`
+subprotocol. `cargo run -p csms -- --help` lists the options (heartbeat interval, call
+timeout, id token allowlist); `RUST_LOG=csms=debug` logs every frame. The supported messages
+and connection rules are in [docs/ocpp-subset.md](docs/ocpp-subset.md).
+
 ## License
 
 Licensed under either of
