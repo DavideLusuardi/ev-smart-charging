@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::builder::PossibleValuesParser;
 use clap::{Args, Parser, Subcommand};
+use optimizer::{SCHEDULERS, scheduler_by_name};
 use simulator::arrivals::generate;
-use simulator::engine::{SCHEDULERS, run, scheduler_by_name};
+use simulator::engine::run;
 use simulator::report::{RunInfo, Summary, append_summary, write_sessions, write_timeseries};
 use simulator::scenario::Scenario;
 

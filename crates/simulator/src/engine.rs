@@ -13,31 +13,12 @@ use std::time::Instant;
 
 use optimizer::types::tolerance;
 use optimizer::{
-    Edf, EqualShare, EvseRef, KnownNeeds, PlanRequest, Planner, Scheduler, SessionState,
-    StepProfile, Violation, dispatch, observe_draw,
+    EvseRef, KnownNeeds, PlanRequest, Planner, Scheduler, SessionState, StepProfile, Violation,
+    dispatch, observe_draw,
 };
 
 use crate::arrivals::{EvArrival, START_SECS};
 use crate::scenario::Scenario;
-
-/// The strategies `scheduler_by_name` knows.
-pub const SCHEDULERS: &[&str] = &[
-    "equal",
-    "edf",
-    #[cfg(feature = "lp")]
-    "lp",
-];
-
-/// A scheduler by its report name.
-pub fn scheduler_by_name(name: &str) -> Option<Box<dyn Scheduler>> {
-    match name {
-        "equal" => Some(Box::new(EqualShare)),
-        "edf" => Some(Box::new(Edf)),
-        #[cfg(feature = "lp")]
-        "lp" => Some(Box::new(optimizer::Lp::default())),
-        _ => None,
-    }
-}
 
 /// A broken invariant. Either one means a bug, so the run stops.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -337,6 +318,7 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::arrivals::generate;
+    use optimizer::{SCHEDULERS, scheduler_by_name};
 
     const HOUR: i64 = 3600;
 

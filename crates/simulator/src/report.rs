@@ -248,8 +248,9 @@ fn percentile(values: &[f64], q: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::arrivals::{EvArrival, generate};
-    use crate::engine::{run, scheduler_by_name};
+    use crate::engine::run;
     use crate::scenario::Scenario;
+    use optimizer::scheduler_by_name;
 
     fn outcome(id: &str, plugged: Option<i64>, delivered_wh: f64) -> SessionOutcome {
         SessionOutcome {
