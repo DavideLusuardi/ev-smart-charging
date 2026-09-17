@@ -4,10 +4,14 @@
 use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
-use csms::{AppState, Config};
+use csms::{AppState, Config, StationId};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
+use ocpp::messages::clear_charging_profile::ClearChargingProfileStatus;
+use ocpp::messages::status_notification::ConnectorStatus;
+use ocpp::messages::{ClearChargingProfile, ClearChargingProfileRequest};
+use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::{ProtocolError, SubProtocolError};
@@ -61,6 +65,21 @@ async fn connect_station(addr: SocketAddr, station: &str) -> Socket {
 async fn exchange(socket: &mut Socket, text: &str) -> Value {
     socket.send(Message::text(text)).await.unwrap();
     recv_json(socket).await
+}
+
+async fn send_json(socket: &mut Socket, frame: Value) {
+    socket.send(Message::text(frame.to_string())).await.unwrap();
+}
+
+/// Polls `condition` until it holds, for at most a second.
+async fn wait_until(mut condition: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("condition not met in time");
 }
 
 async fn recv_json(socket: &mut Socket) -> Value {
@@ -125,4 +144,128 @@ async fn rejects_invalid_station_ids() {
         }
         other => panic!("expected HTTP 400, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn boot_heartbeat_and_status_update_the_site_state() {
+    let (addr, state) = start_csms(Config::default()).await;
+    let id = StationId::try_from("CS1").unwrap();
+    let mut socket = connect_station(addr, "CS1").await;
+
+    let boot = json!([2, "1", "BootNotification", {
+        "chargingStation": { "model": "Wallbox 22", "vendorName": "Acme" },
+        "reason": "PowerUp"
+    }]);
+    send_json(&mut socket, boot).await;
+    let reply = recv_json(&mut socket).await;
+    assert_eq!(reply[0], 3);
+    assert_eq!(reply[1], "1");
+    assert_eq!(reply[2]["status"], "Accepted");
+    assert_eq!(reply[2]["interval"], 300);
+    assert!(state.registry.is_connected(&id));
+
+    let reply = exchange(&mut socket, r#"[2,"2","Heartbeat",{}]"#).await;
+    assert!(reply[2]["currentTime"].is_string());
+
+    for (evse, status) in [(1, "Available"), (2, "Occupied")] {
+        let frame = json!([2, format!("s{evse}"), "StatusNotification", {
+            "timestamp": "2026-09-30T08:00:00Z",
+            "connectorStatus": status,
+            "evseId": evse,
+            "connectorId": 1
+        }]);
+        send_json(&mut socket, frame).await;
+        assert_eq!(
+            recv_json(&mut socket).await,
+            json!([3, format!("s{evse}"), {}])
+        );
+    }
+
+    {
+        let site = state.site();
+        let station = site.station(&id).expect("station known");
+        let info = station.info.as_ref().expect("booted");
+        assert_eq!(
+            (info.vendor.as_str(), info.model.as_str()),
+            ("Acme", "Wallbox 22")
+        );
+        assert_eq!(station.evses[&1].connectors[&1], ConnectorStatus::Available);
+        assert_eq!(station.evses[&2].connectors[&1], ConnectorStatus::Occupied);
+    }
+
+    // Closing the socket unregisters the station; what it reported stays.
+    socket.close(None).await.unwrap();
+    wait_until(|| !state.registry.is_connected(&id)).await;
+    assert!(state.site().station(&id).is_some());
+}
+
+#[tokio::test]
+async fn csms_calls_reach_the_station_one_at_a_time() {
+    let (addr, state) = start_csms(Config::default()).await;
+    let id = StationId::try_from("CS1").unwrap();
+    let mut socket = connect_station(addr, "CS1").await;
+    wait_until(|| state.registry.is_connected(&id)).await;
+    let handle = state.registry.get(&id).unwrap();
+
+    let calls: Vec<_> = (1..=2)
+        .map(|profile_id| {
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                let request = ClearChargingProfileRequest {
+                    custom_data: None,
+                    charging_profile_id: Some(profile_id),
+                    charging_profile_criteria: None,
+                };
+                handle.call::<ClearChargingProfile>(&request).await
+            })
+        })
+        .collect();
+
+    let first = recv_json(&mut socket).await;
+    assert_eq!(first[0], 2);
+    assert_eq!(first[2], "ClearChargingProfile");
+    // The second call waits until the first is answered.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), socket.next())
+            .await
+            .is_err()
+    );
+    send_json(&mut socket, json!([3, first[1], { "status": "Accepted" }])).await;
+
+    let second = recv_json(&mut socket).await;
+    assert_eq!(second[2], "ClearChargingProfile");
+    assert_ne!(second[1], first[1]);
+    assert_ne!(second[3], first[3]);
+    send_json(&mut socket, json!([3, second[1], { "status": "Unknown" }])).await;
+
+    // Each caller gets the answer to its own call.
+    let first_profile = first[3]["chargingProfileId"].as_i64().unwrap();
+    for (profile_id, call) in (1..).zip(calls) {
+        let expected = if profile_id == first_profile {
+            ClearChargingProfileStatus::Accepted
+        } else {
+            ClearChargingProfileStatus::Unknown
+        };
+        assert_eq!(call.await.unwrap().unwrap().status, expected);
+    }
+}
+
+#[tokio::test]
+async fn a_reconnecting_station_replaces_its_old_connection() {
+    let (addr, state) = start_csms(Config::default()).await;
+    let id = StationId::try_from("CS1").unwrap();
+    let mut old = connect_station(addr, "CS1").await;
+    wait_until(|| state.registry.is_connected(&id)).await;
+
+    let mut new = connect_station(addr, "CS1").await;
+    loop {
+        match old.next().await {
+            Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+            Some(Ok(_)) => {}
+        }
+    }
+
+    let reply = exchange(&mut new, r#"[2,"1","Heartbeat",{}]"#).await;
+    assert_eq!(reply[0], 3);
+    assert!(state.registry.is_connected(&id));
 }
