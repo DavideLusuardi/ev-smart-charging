@@ -352,3 +352,279 @@ mod tests {
         );
     }
 }
+
+/// The control loop against fake stations, with paused time.
+#[cfg(test)]
+mod loop_tests {
+    use std::time::Duration;
+
+    use tokio::time::sleep;
+
+    use crate::testing::{Mode, TestSite};
+    use crate::{Config, ControlSettings, SiteConfig};
+
+    const EVSE_MAX_W: f64 = 22_000.0;
+    const FALLBACK_W: f64 = 1_400.0;
+
+    fn site(grid_limit_w: f64, scheduler: &str) -> TestSite {
+        TestSite::start(Config {
+            site: SiteConfig {
+                grid_limit_w,
+                ..SiteConfig::default()
+            },
+            control: ControlSettings {
+                scheduler: scheduler.into(),
+                ..ControlSettings::default()
+            },
+            ..Config::default()
+        })
+    }
+
+    fn assert_limit_held(site: &TestSite) {
+        let model = site.model();
+        assert!(model.violations.is_empty(), "{:#?}", model.violations);
+    }
+
+    /// Long enough for the debounce, the plan, and the profiles to be accepted.
+    async fn settle() {
+        sleep(Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_session_runs_on_the_fallback_until_its_first_plan() {
+        let site = site(100_000.0, "equal");
+        let mut cs = site.connect("CS1", 2).await;
+        sleep(Duration::from_millis(10)).await;
+        assert_eq!(site.model().station("CS1").tx_default_w, Some(FALLBACK_W));
+
+        cs.start("a", 1).await;
+        sleep(Duration::from_millis(900)).await;
+        assert_eq!(site.model().tx_profiles_received("CS1"), 0);
+        assert_eq!(cs.limit_now(1), FALLBACK_W);
+
+        // Planned after the 1 s debounce, well before the 30 s tick.
+        sleep(Duration::from_millis(200)).await;
+        let profile = site
+            .model()
+            .tx_profile("CS1", 1)
+            .cloned()
+            .expect("a TxProfile");
+        assert_eq!(profile.value_at(site.now_secs()), EVSE_MAX_W);
+        assert_limit_held(&site);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_ended_session_frees_its_capacity() {
+        let site = site(30_000.0, "equal");
+        let mut cs = site.connect("CS1", 2).await;
+        cs.start("a", 1).await;
+        cs.start("b", 2).await;
+        settle().await;
+        assert_eq!(cs.limit_now(1), 15_000.0);
+        assert_eq!(cs.limit_now(2), 15_000.0);
+
+        cs.end("b", 2).await;
+        settle().await;
+        // EVSE 2 is idle again, so its fallback stays free: 28.6 kW left, capped at 22 kW.
+        assert_eq!(cs.limit_now(1), EVSE_MAX_W);
+        assert_limit_held(&site);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn small_changes_are_not_sent() {
+        let site = site(100_000.0, "edf");
+        let mut cs = site.connect("CS1", 1).await;
+        let departure = site.now_secs() + 11 * 3600;
+        cs.start("a", 1).await;
+        cs.needs(1, departure, 1_000_000.0, EVSE_MAX_W).await;
+        settle().await;
+        // The plan drops to 0 W at departure, below the fallback, so it went out in two
+        // phases: the drop first.
+        let sent = site.model().tx_profiles_received("CS1");
+        assert_eq!(sent, 2);
+
+        // Twenty minutes of ticks, the EV drawing a little under its limit.
+        let mut energy = 0.0;
+        for _ in 0..20 {
+            energy += 21_800.0 / 60.0;
+            cs.meter("a", energy, 21_800.0, false).await;
+            sleep(Duration::from_secs(60)).await;
+        }
+        assert_eq!(site.model().tx_profiles_received("CS1"), sent);
+
+        // A real change goes out, a pure decrease in one message.
+        cs.needs(1, departure, 1_000_000.0, 11_000.0).await;
+        settle().await;
+        assert_eq!(site.model().tx_profiles_received("CS1"), sent + 1);
+        assert_eq!(cs.limit_now(1), 11_000.0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reported_needs_change_the_plan() {
+        // Room for one EV at full power. Under EDF the earliest departure goes first.
+        let site = site(EVSE_MAX_W, "edf");
+        let mut cs = site.connect("CS1", 2).await;
+        cs.start("a", 1).await;
+        settle().await;
+        sleep(Duration::from_secs(60)).await;
+        cs.start("b", 2).await;
+        settle().await;
+        // Both on the default stay; a arrived first, so it leaves first.
+        assert_eq!(cs.limit_now(1), EVSE_MAX_W);
+        assert_eq!(cs.limit_now(2), 0.0);
+
+        cs.needs(2, site.now_secs() + 3600, 10_000.0, EVSE_MAX_W)
+            .await;
+        settle().await;
+        assert_eq!(cs.limit_now(1), 0.0);
+        assert_eq!(cs.limit_now(2), EVSE_MAX_W);
+        assert_limit_held(&site);
+    }
+
+    /// B rejects its decrease, so C's increase must wait: sending it would put the site
+    /// over the limit while B still follows its old profile.
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_decrease_holds_back_the_increases() {
+        let site = site(30_000.0, "equal");
+        let mut a = site.connect("A", 1).await;
+        let mut b = site.connect("B", 1).await;
+        let mut c = site.connect("C", 1).await;
+        a.start("a", 1).await;
+        b.start("b", 1).await;
+        settle().await;
+        // C's idle EVSE keeps its fallback free.
+        assert_eq!(a.limit_now(1), 14_300.0);
+        assert_eq!(b.limit_now(1), 14_300.0);
+
+        b.set_mode(Mode::Reject);
+        c.start("c", 1).await;
+        settle().await;
+        assert_eq!(a.limit_now(1), 10_000.0);
+        assert_eq!(b.limit_now(1), 14_300.0);
+        assert_eq!(c.limit_now(1), FALLBACK_W);
+        assert_limit_held(&site);
+
+        // The next tick tries again.
+        b.set_mode(Mode::Accept);
+        sleep(Duration::from_secs(30)).await;
+        assert_eq!(b.limit_now(1), 10_000.0);
+        assert_eq!(c.limit_now(1), 10_000.0);
+        assert_limit_held(&site);
+    }
+
+    /// Without an answer the CSMS can't know which profile the station follows, so it counts
+    /// the higher one.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_profile_counts_at_the_higher_limit() {
+        let site = site(100_000.0, "equal");
+        let mut cs = site.connect("CS1", 1).await;
+        sleep(Duration::from_millis(10)).await;
+        cs.set_mode(Mode::Silent);
+        cs.start("a", 1).await;
+        // Leaving after the 12 h horizon: the plan is a flat 22 kW, a pure increase.
+        cs.needs(1, site.now_secs() + 24 * 3600, 1_000_000.0, EVSE_MAX_W)
+            .await;
+        settle().await;
+        assert_eq!(site.model().tx_profiles_received("CS1"), 1);
+        assert!(site.state.site().effective_profiles().is_empty());
+
+        // The call times out after 30 s.
+        sleep(Duration::from_secs(30)).await;
+        let now = site.now_secs();
+        let effective = site
+            .state
+            .site()
+            .effective_profiles()
+            .values()
+            .next()
+            .cloned();
+        assert_eq!(effective.expect("recorded").value_at(now), EVSE_MAX_W);
+        // The station itself stayed on its fallback, which is below that.
+        assert_eq!(cs.limit_now(1), FALLBACK_W);
+    }
+
+    /// Three stations with two EVSEs each share 40 kW while EVs come and go for six hours,
+    /// some reporting their needs and some not. The EVs draw what their limit allows.
+    #[tokio::test(start_paused = true)]
+    async fn the_grid_limit_holds_as_evs_come_and_go() {
+        const LIMIT_W: f64 = 40_000.0;
+        let site = site(LIMIT_W, "edf");
+        let mut stations = Vec::new();
+        for id in ["CS1", "CS2", "CS3"] {
+            stations.push(site.connect(id, 2).await);
+        }
+
+        struct Ev {
+            station: usize,
+            evse: i32,
+            arrive_min: i64,
+            leave_min: i64,
+            energy_wh: f64,
+            max_w: f64,
+            iso15118: bool,
+            delivered_wh: f64,
+        }
+        let ev = |station, evse, arrive_min, stay_min, energy_wh, max_w, iso15118| Ev {
+            station,
+            evse,
+            arrive_min,
+            leave_min: arrive_min + stay_min,
+            energy_wh,
+            max_w,
+            iso15118,
+            delivered_wh: 0.0,
+        };
+        let mut evs = [
+            ev(0, 1, 0, 240, 30_000.0, 22_000.0, true),
+            ev(0, 2, 10, 120, 20_000.0, 11_000.0, false),
+            ev(1, 1, 20, 300, 40_000.0, 22_000.0, true),
+            ev(1, 2, 30, 90, 15_000.0, 22_000.0, false),
+            ev(2, 1, 45, 200, 25_000.0, 7_400.0, false),
+            ev(2, 2, 60, 180, 30_000.0, 22_000.0, true),
+            ev(1, 2, 150, 120, 10_000.0, 22_000.0, true),
+            ev(0, 2, 180, 120, 20_000.0, 22_000.0, false),
+        ];
+
+        let mut peak_w: f64 = 0.0;
+        for minute in 0..360 {
+            for (i, ev) in evs.iter_mut().enumerate() {
+                let tx = format!("tx{i}");
+                let cs = &mut stations[ev.station];
+                if minute == ev.arrive_min {
+                    cs.start(&tx, ev.evse).await;
+                    if ev.iso15118 {
+                        let departure = site.now_secs() + (ev.leave_min - minute) * 60;
+                        cs.needs(ev.evse, departure, ev.energy_wh, ev.max_w).await;
+                    }
+                } else if minute == ev.leave_min {
+                    cs.end(&tx, ev.evse).await;
+                }
+            }
+            let mut total_w = 0.0;
+            for (i, ev) in evs.iter_mut().enumerate() {
+                if !(ev.arrive_min..ev.leave_min).contains(&minute) {
+                    continue;
+                }
+                let cs = &mut stations[ev.station];
+                let wanted_w = (ev.energy_wh - ev.delivered_wh) * 60.0;
+                let power_w = cs.limit_now(ev.evse).min(ev.max_w).min(wanted_w).max(0.0);
+                ev.delivered_wh += power_w / 60.0;
+                total_w += power_w;
+                let full = ev.delivered_wh >= ev.energy_wh - 1e-6;
+                cs.meter(&format!("tx{i}"), ev.delivered_wh, power_w, full)
+                    .await;
+            }
+            assert!(total_w <= LIMIT_W + 1e-3, "minute {minute}: {total_w} W");
+            peak_w = peak_w.max(total_w);
+            sleep(Duration::from_secs(60)).await;
+        }
+
+        assert_limit_held(&site);
+        assert!(
+            peak_w > 0.9 * LIMIT_W,
+            "the limit should bind, peak {peak_w} W"
+        );
+        let delivered: f64 = evs.iter().map(|e| e.delivered_wh).sum();
+        assert!(delivered > 100_000.0, "{delivered} Wh");
+    }
+}

@@ -16,6 +16,8 @@ pub mod profiles;
 pub mod registry;
 pub mod state;
 pub mod station_id;
+#[cfg(test)]
+mod testing;
 mod transactions;
 mod ws;
 

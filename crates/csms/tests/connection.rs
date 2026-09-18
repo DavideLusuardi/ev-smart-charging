@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use csms::{AppState, Config, StationId};
+use csms::{AppState, Config, ControlSettings, StationId};
 use futures_util::{SinkExt, StreamExt};
 use ocpp::messages::clear_charging_profile::ClearChargingProfileStatus;
 use ocpp::messages::status_notification::ConnectorStatus;
@@ -281,4 +281,75 @@ async fn a_reconnecting_station_replaces_its_old_connection() {
     let reply = exchange(&mut new, r#"[2,"1","Heartbeat",{}]"#).await;
     assert_eq!(reply[0], 3);
     assert!(state.registry.is_connected(&id));
+}
+
+#[tokio::test]
+async fn a_started_transaction_gets_a_tx_profile() {
+    let config = Config {
+        control: ControlSettings {
+            debounce: Duration::from_millis(20),
+            ..ControlSettings::default()
+        },
+        ..Config::default()
+    };
+    let (addr, state) = start_csms(config).await;
+    csms::spawn_control_loop(state.clone()).unwrap();
+    let mut socket = connect_station(addr, "CS1").await;
+
+    let boot = json!([2, "1", "BootNotification", {
+        "chargingStation": { "model": "Wallbox 22", "vendorName": "Acme" },
+        "reason": "PowerUp"
+    }]);
+    send_json(&mut socket, boot).await;
+    assert_eq!(recv_json(&mut socket).await[1], "1");
+    let tx_default = recv_json(&mut socket).await;
+    assert_eq!(tx_default[2], "SetChargingProfile");
+    send_json(
+        &mut socket,
+        json!([3, tx_default[1], { "status": "Accepted" }]),
+    )
+    .await;
+
+    let status = json!([2, "2", "StatusNotification", {
+        "timestamp": "2026-09-30T08:00:00Z",
+        "connectorStatus": "Occupied",
+        "evseId": 1,
+        "connectorId": 1
+    }]);
+    send_json(&mut socket, status).await;
+    assert_eq!(recv_json(&mut socket).await, json!([3, "2", {}]));
+
+    let started = json!([2, "3", "TransactionEvent", {
+        "eventType": "Started",
+        "timestamp": ocpp::DateTime::now(),
+        "triggerReason": "CablePluggedIn",
+        "seqNo": 0,
+        "transactionInfo": { "transactionId": "tx-42" },
+        "evse": { "id": 1, "connectorId": 1 }
+    }]);
+    send_json(&mut socket, started).await;
+    assert_eq!(recv_json(&mut socket).await, json!([3, "3", {}]));
+
+    // The default stay ends within the horizon, at 0 W, below the fallback: first that
+    // drop, then the raise to the EVSE's full 22 kW.
+    let mut first_limits = Vec::new();
+    for _ in 0..2 {
+        let call = recv_json(&mut socket).await;
+        assert_eq!(call[2], "SetChargingProfile");
+        assert_eq!(call[3]["evseId"], 1);
+        let profile = &call[3]["chargingProfile"];
+        assert_eq!(profile["chargingProfilePurpose"], "TxProfile");
+        assert_eq!(profile["transactionId"], "tx-42");
+        let periods = &profile["chargingSchedule"][0]["chargingSchedulePeriod"];
+        assert_eq!(periods.as_array().unwrap().last().unwrap()["limit"], 0.0);
+        first_limits.push(periods[0]["limit"].as_f64().unwrap());
+        send_json(&mut socket, json!([3, call[1], { "status": "Accepted" }])).await;
+    }
+    assert_eq!(first_limits, [1_400.0, 22_000.0]);
+    wait_until(|| {
+        let site = state.site();
+        let profile = site.effective_profiles().values().next().cloned();
+        profile.is_some_and(|p| p.first_limit_w() == 22_000.0)
+    })
+    .await;
 }
