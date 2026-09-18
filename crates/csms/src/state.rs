@@ -11,6 +11,7 @@ use ocpp::messages::status_notification::ConnectorStatus;
 use ocpp::messages::transaction_event::ChargingState;
 use optimizer::{EvseRef, KnownNeeds, SessionState, StepProfile};
 
+use crate::charging_needs::ReportedNeeds;
 use crate::station_id::StationId;
 
 /// Every station that has connected since the CSMS started, and the sessions in progress.
@@ -24,6 +25,8 @@ pub struct SiteState {
     /// The TxProfile each EVSE last accepted. An EVSE without one follows its
     /// TxDefaultProfile.
     effective: BTreeMap<EvseRef, StepProfile>,
+    /// Needs reported on an EVSE before its transaction started.
+    pending_needs: BTreeMap<EvseRef, ReportedNeeds>,
 }
 
 /// One station.
@@ -127,6 +130,7 @@ impl SiteState {
             stations: BTreeMap::new(),
             sessions: BTreeMap::new(),
             effective: BTreeMap::new(),
+            pending_needs: BTreeMap::new(),
         }
     }
 
@@ -204,6 +208,24 @@ impl SiteState {
         let session = self.sessions.remove(transaction_id)?;
         self.effective.remove(&session.evse);
         Some(session)
+    }
+
+    /// Sets what a session needs, replacing any earlier report or estimate. Returns whether
+    /// the session exists.
+    pub fn set_needs(&mut self, transaction_id: &str, needs: KnownNeeds) -> bool {
+        self.session_mut(transaction_id)
+            .map(|s| s.needs = Some(needs))
+            .is_some()
+    }
+
+    /// Keeps needs reported on an EVSE with no session, for the next session there.
+    pub fn set_pending_needs(&mut self, evse: EvseRef, needs: ReportedNeeds) {
+        self.pending_needs.insert(evse, needs);
+    }
+
+    /// Takes the needs waiting on an EVSE, or drops them when the EV left without charging.
+    pub fn take_pending_needs(&mut self, evse: &EvseRef) -> Option<ReportedNeeds> {
+        self.pending_needs.remove(evse)
     }
 
     /// The TxProfile each EVSE last accepted.

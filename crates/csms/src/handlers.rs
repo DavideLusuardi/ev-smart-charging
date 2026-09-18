@@ -11,14 +11,16 @@ use ocpp::messages::boot_notification::{
 use ocpp::messages::heartbeat::HeartbeatResponse;
 use ocpp::messages::status_notification::{StatusNotificationRequest, StatusNotificationResponse};
 use ocpp::types::{AuthorizationStatus, IdToken, IdTokenInfo};
-use ocpp::{DateTime, ErrorCode, Frame, MessageId, StationRequest};
+use ocpp::{DateTime, Frame, MessageId, StationRequest};
 use serde_json::Value;
 use tracing::info;
 
-use crate::Config;
+use ocpp::messages::status_notification::ConnectorStatus;
+use optimizer::EvseRef;
+
 use crate::state::{SiteState, StationInfo, StationState};
 use crate::station_id::StationId;
-use crate::transactions;
+use crate::{Config, charging_needs, transactions};
 
 /// The answer to one CALL, and what it changed.
 #[derive(Debug)]
@@ -66,6 +68,13 @@ pub(crate) fn handle(
         )),
         StationRequest::StatusNotification(req) => {
             let new_evse = status_notification(site.touch(station, now), &req);
+            if req.connector_status == ConnectorStatus::Available {
+                // The EV is gone; needs it reported must not stick to the next one.
+                site.take_pending_needs(&EvseRef {
+                    station_id: station.as_str().to_owned(),
+                    evse_id: req.evse_id,
+                });
+            }
             Handled {
                 reply: Frame::call_result(id, &StatusNotificationResponse::default()),
                 replan: new_evse,
@@ -81,11 +90,14 @@ pub(crate) fn handle(
                 replan,
             }
         }
-        StationRequest::NotifyEvChargingNeeds(_) => Handled::reply(Frame::call_error(
-            id,
-            ErrorCode::NotSupported,
-            format!("{} is not handled yet", request.action()),
-        )),
+        StationRequest::NotifyEvChargingNeeds(req) => {
+            let (response, replan) =
+                charging_needs::notify_ev_charging_needs(&config.site, site, station, &req);
+            Handled {
+                reply: Frame::call_result(id, &response),
+                replan,
+            }
+        }
     }
 }
 
@@ -162,7 +174,7 @@ pub(crate) fn id_token_info(config: &Config, id_token: &IdToken) -> IdTokenInfo 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use ocpp::messages::status_notification::ConnectorStatus;
+    use ocpp::ErrorCode;
     use serde_json::json;
     use std::collections::HashSet;
     use std::time::Duration;

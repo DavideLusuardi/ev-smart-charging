@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
             grid_limit_w: cli.grid_limit_w,
             evse_max_w: cli.evse_max_w,
             fallback_limit_w: cli.fallback_limit_w,
+            ..SiteConfig::default()
         },
         ..Config::default()
     });

@@ -5,6 +5,7 @@
 //! keeps track of which stations are connected. What the stations report, including the
 //! sessions in progress, is kept in the [`SiteState`].
 
+mod charging_needs;
 pub mod clock;
 mod connection;
 pub mod handle;
@@ -22,8 +23,10 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::routing::get;
+use optimizer::NeedsDefaults;
 use tokio::sync::Notify;
 
+pub use charging_needs::ReportedNeeds;
 pub use clock::Clock;
 pub use handle::{CallError, StationHandle};
 pub use registry::Registry;
@@ -56,6 +59,10 @@ pub struct SiteConfig {
     pub evse_max_w: f64,
     /// The TxDefaultProfile limit: what an EVSE may draw without a plan.
     pub fallback_limit_w: f64,
+    /// Phases wired to every AC EVSE.
+    pub ac_phases: u32,
+    /// What the CSMS assumes for EVs that don't report their needs.
+    pub needs_defaults: NeedsDefaults,
 }
 
 impl Default for SiteConfig {
@@ -64,6 +71,12 @@ impl Default for SiteConfig {
             grid_limit_w: 100_000.0,
             evse_max_w: 22_000.0,
             fallback_limit_w: 1_400.0,
+            ac_phases: 3,
+            // A workday at the office, and a typical commute's worth of energy.
+            needs_defaults: NeedsDefaults {
+                dwell_secs: 8 * 3_600,
+                energy_wh: 20_000.0,
+            },
         }
     }
 }

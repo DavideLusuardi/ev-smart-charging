@@ -37,7 +37,7 @@ pub(crate) fn transaction_event(
             ended.is_some()
         }
         TransactionEventKind::Started | TransactionEventKind::Updated => {
-            let started = site.session(tx).is_none() && start(site, station, req);
+            let started = site.session(tx).is_none() && start(config, site, station, req);
             let changed = site.session(tx).is_some() && update(config, site, req);
             started || changed
         }
@@ -54,7 +54,12 @@ pub(crate) fn transaction_event(
 /// Starts tracking a transaction. One the CSMS first hears of in an `Updated` event (it
 /// restarted, or missed the `Started`) is adopted, from now. Returns whether a session was
 /// added; without an EVSE there is nothing to plan.
-fn start(site: &mut SiteState, station: &StationId, req: &TransactionEventRequest) -> bool {
+fn start(
+    config: &Config,
+    site: &mut SiteState,
+    station: &StationId,
+    req: &TransactionEventRequest,
+) -> bool {
     let tx = req.transaction_info.transaction_id.as_str();
     let Some(evse) = &req.evse else {
         warn!(
@@ -72,7 +77,12 @@ fn start(site: &mut SiteState, station: &StationId, req: &TransactionEventReques
     } else {
         info!(tx, %evse, "session started");
     }
-    site.start_session(Session::new(tx, evse, req.timestamp));
+    let mut session = Session::new(tx, evse, req.timestamp);
+    if let Some(needs) = site.take_pending_needs(&session.evse) {
+        session.needs =
+            Some(needs.resolve(session.started.timestamp(), &config.site.needs_defaults));
+    }
+    site.start_session(session);
     true
 }
 
