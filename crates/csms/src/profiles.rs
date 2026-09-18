@@ -16,6 +16,9 @@ use optimizer::StepProfile;
 /// The most periods a charging schedule can hold.
 pub const MAX_PERIODS: usize = 1024;
 
+/// The id of the TxDefaultProfile sent after boot.
+pub const TX_DEFAULT_PROFILE_ID: i32 = 1;
+
 /// The TxProfile id of an EVSE.
 pub fn tx_profile_id(evse_id: i32) -> i32 {
     100 + evse_id
@@ -90,6 +93,46 @@ pub fn tx_profile(
     })
 }
 
+/// A TxDefaultProfile for the whole station: every EVSE draws at most `limit_w` from `start`
+/// until the CSMS sends it a TxProfile.
+// TODO(spec): that a TxDefaultProfile on evseId 0 limits each EVSE separately, rather than
+// the station as a whole, is how we read OCPP 2.0.1 Part 2 (K01); confirm it.
+pub fn tx_default_profile(limit_w: f64, start: DateTime) -> SetChargingProfileRequest {
+    let schedule = ChargingSchedule {
+        custom_data: None,
+        id: TX_DEFAULT_PROFILE_ID,
+        start_schedule: Some(start),
+        duration: None,
+        charging_rate_unit: ChargingRateUnit::W,
+        charging_schedule_period: BoundedVec::new(vec![ChargingSchedulePeriod {
+            custom_data: None,
+            start_period: 0,
+            limit: limit_w,
+            number_phases: None,
+            phase_to_use: None,
+        }])
+        .expect("one period"),
+        min_charging_rate: None,
+        sales_tariff: None,
+    };
+    SetChargingProfileRequest {
+        custom_data: None,
+        evse_id: 0,
+        charging_profile: ChargingProfile {
+            custom_data: None,
+            id: TX_DEFAULT_PROFILE_ID,
+            stack_level: 0,
+            charging_profile_purpose: ChargingProfilePurpose::TxDefaultProfile,
+            charging_profile_kind: ChargingProfileKind::Absolute,
+            recurrency_kind: None,
+            valid_from: None,
+            valid_to: None,
+            charging_schedule: BoundedVec::new(vec![schedule]).expect("one schedule"),
+            transaction_id: None,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +153,16 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(encode(&request), expected);
+    }
+
+    #[test]
+    fn the_tx_default_profile_matches_the_ocpp_shape() {
+        let start: DateTime = ocpp::decode(serde_json::json!("2026-09-28T09:59:30Z")).unwrap();
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../ocpp/tests/fixtures/SetChargingProfileRequest.tx-default.json"
+        ))
+        .unwrap();
+        assert_eq!(encode(&tx_default_profile(1_400.0, start)), expected);
     }
 
     #[test]

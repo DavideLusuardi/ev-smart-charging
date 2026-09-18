@@ -12,16 +12,18 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ocpp::messages::SetChargingProfile;
+use ocpp::messages::set_charging_profile::ChargingProfileStatus;
 use ocpp::{Frame, MessageId};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
-use tracing::{debug, info, warn};
+use tracing::{Instrument, debug, info, warn};
 
 use crate::AppState;
 use crate::handle::{CallError, OutboundCall, StationHandle};
-use crate::handlers;
 use crate::station_id::StationId;
+use crate::{handlers, profiles};
 
 /// Registers the station, runs its connection until it ends, then unregisters it.
 ///
@@ -133,6 +135,9 @@ impl Connection {
                 if handled.replan {
                     self.state.replan.notify_one();
                 }
+                if handled.booted {
+                    self.send_tx_default_profile();
+                }
                 flow
             }
             Ok(response) => {
@@ -140,6 +145,32 @@ impl Connection {
                 ControlFlow::Continue(())
             }
         }
+    }
+
+    /// Caps every EVSE of the station at the fallback limit until it gets a plan, so the
+    /// station stays within what the CSMS reserved for it even if the CSMS goes away.
+    ///
+    /// The call runs on its own task: this task is the one that reads the answer.
+    fn send_tx_default_profile(&self) {
+        let Some(handle) = self.state.registry.get(&self.station) else {
+            return;
+        };
+        let request = profiles::tx_default_profile(
+            self.state.config.site.fallback_limit_w,
+            self.state.clock.now(),
+        );
+        tokio::spawn(
+            async move {
+                match handle.call::<SetChargingProfile>(&request).await {
+                    Ok(r) if r.status == ChargingProfileStatus::Accepted => {
+                        debug!("TxDefaultProfile accepted");
+                    }
+                    Ok(r) => warn!(info = ?r.status_info, "TxDefaultProfile rejected"),
+                    Err(e) => warn!(error = %e, "TxDefaultProfile not delivered"),
+                }
+            }
+            .in_current_span(),
+        );
     }
 
     async fn start_call(&mut self, call: OutboundCall) -> ControlFlow<()> {

@@ -29,6 +29,8 @@ pub(crate) struct Handled {
     pub reply: Frame,
     /// Something changed that calls for a new plan.
     pub replan: bool,
+    /// The station booted, so it needs its TxDefaultProfile.
+    pub booted: bool,
 }
 
 impl Handled {
@@ -36,6 +38,7 @@ impl Handled {
         Self {
             reply,
             replan: false,
+            booted: false,
         }
     }
 }
@@ -57,7 +60,10 @@ pub(crate) fn handle(
     match request {
         StationRequest::BootNotification(req) => {
             let response = boot_notification(config, site.touch(station, now), now, &req);
-            Handled::reply(Frame::call_result(id, &response))
+            Handled {
+                booted: response.status == RegistrationStatus::Accepted,
+                ..Handled::reply(Frame::call_result(id, &response))
+            }
         }
         StationRequest::Heartbeat(_) => Handled::reply(Frame::call_result(
             id,
@@ -76,8 +82,11 @@ pub(crate) fn handle(
                 });
             }
             Handled {
-                reply: Frame::call_result(id, &StatusNotificationResponse::default()),
                 replan: new_evse,
+                ..Handled::reply(Frame::call_result(
+                    id,
+                    &StatusNotificationResponse::default(),
+                ))
             }
         }
         StationRequest::Authorize(req) => {
@@ -86,16 +95,16 @@ pub(crate) fn handle(
         StationRequest::TransactionEvent(req) => {
             let (response, replan) = transactions::transaction_event(config, site, station, &req);
             Handled {
-                reply: Frame::call_result(id, &response),
                 replan,
+                ..Handled::reply(Frame::call_result(id, &response))
             }
         }
         StationRequest::NotifyEvChargingNeeds(req) => {
             let (response, replan) =
                 charging_needs::notify_ev_charging_needs(&config.site, site, station, &req);
             Handled {
-                reply: Frame::call_result(id, &response),
                 replan,
+                ..Handled::reply(Frame::call_result(id, &response))
             }
         }
     }
@@ -238,6 +247,8 @@ pub(crate) mod tests {
             },
             "reason": "PowerUp"
         });
+        let handled = run(&config, &mut site, "BootNotification", payload.clone());
+        assert!(handled.booted);
         let response = call(&config, &mut site, "BootNotification", payload);
         assert_eq!(response["status"], "Accepted");
         assert_eq!(response["interval"], 120);

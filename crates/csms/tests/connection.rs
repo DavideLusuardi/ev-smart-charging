@@ -164,6 +164,19 @@ async fn boot_heartbeat_and_status_update_the_site_state() {
     assert_eq!(reply[2]["interval"], 300);
     assert!(state.registry.is_connected(&id));
 
+    // Right after boot, every EVSE is capped at the fallback limit until it gets a plan.
+    let call = recv_json(&mut socket).await;
+    assert_eq!(call[0], 2);
+    assert_eq!(call[2], "SetChargingProfile");
+    assert_eq!(call[3]["evseId"], 0);
+    let profile = &call[3]["chargingProfile"];
+    assert_eq!(profile["chargingProfilePurpose"], "TxDefaultProfile");
+    assert_eq!(
+        profile["chargingSchedule"][0]["chargingSchedulePeriod"],
+        json!([{ "startPeriod": 0, "limit": 1400.0 }])
+    );
+    send_json(&mut socket, json!([3, call[1], { "status": "Accepted" }])).await;
+
     let reply = exchange(&mut socket, r#"[2,"2","Heartbeat",{}]"#).await;
     assert!(reply[2]["currentTime"].is_string());
 
