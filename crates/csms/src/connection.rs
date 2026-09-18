@@ -12,16 +12,18 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ocpp::{DateTime, Frame, MessageId};
+use ocpp::messages::SetChargingProfile;
+use ocpp::messages::set_charging_profile::ChargingProfileStatus;
+use ocpp::{Frame, MessageId};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
-use tracing::{debug, info, warn};
+use tracing::{Instrument, debug, info, warn};
 
 use crate::AppState;
 use crate::handle::{CallError, OutboundCall, StationHandle};
-use crate::handlers;
 use crate::station_id::StationId;
+use crate::{handlers, profiles};
 
 /// Registers the station, runs its connection until it ends, then unregisters it.
 ///
@@ -49,6 +51,8 @@ pub(crate) async fn serve(
     connection.run(incoming, registration.stop).await;
     state.registry.unregister(&station, registration.generation);
     info!("station disconnected");
+    // Its sessions can no longer be steered, so the others must plan around them.
+    state.replan.notify_one();
 }
 
 struct Connection {
@@ -100,7 +104,7 @@ impl Connection {
 
     async fn on_text(&mut self, text: &str) -> ControlFlow<()> {
         // Any frame, even a broken one, shows the station is alive.
-        let now = DateTime::now();
+        let now = self.state.clock.now();
         self.state.site().touch(&self.station, now);
         match Frame::parse(text) {
             Err(e) => {
@@ -118,19 +122,55 @@ impl Connection {
                 debug!(%id, %action, "call from station");
                 // Handlers run inline on this task, so a handler must never wait for a CALL
                 // on its own connection: the response could only be read by this task.
-                let reply = {
-                    let mut site = self.state.site();
-                    // Same timestamp as above; `touch` just hands back the station.
-                    let station = site.touch(&self.station, now);
-                    handlers::handle(&self.state.config, station, id, &action, payload)
-                };
-                self.send(reply).await
+                let handled = handlers::handle(
+                    &self.state.config,
+                    &mut self.state.site(),
+                    &self.station,
+                    now,
+                    id,
+                    &action,
+                    payload,
+                );
+                let flow = self.send(handled.reply).await;
+                if handled.replan {
+                    self.state.replan.notify_one();
+                }
+                if handled.booted {
+                    self.send_tx_default_profile();
+                }
+                flow
             }
             Ok(response) => {
                 self.on_response(response);
                 ControlFlow::Continue(())
             }
         }
+    }
+
+    /// Caps every EVSE of the station at the fallback limit until it gets a plan, so the
+    /// station stays within what the CSMS reserved for it even if the CSMS goes away.
+    ///
+    /// The call runs on its own task: this task is the one that reads the answer.
+    fn send_tx_default_profile(&self) {
+        let Some(handle) = self.state.registry.get(&self.station) else {
+            return;
+        };
+        let request = profiles::tx_default_profile(
+            self.state.config.site.fallback_limit_w,
+            self.state.clock.now(),
+        );
+        tokio::spawn(
+            async move {
+                match handle.call::<SetChargingProfile>(&request).await {
+                    Ok(r) if r.status == ChargingProfileStatus::Accepted => {
+                        debug!("TxDefaultProfile accepted");
+                    }
+                    Ok(r) => warn!(info = ?r.status_info, "TxDefaultProfile rejected"),
+                    Err(e) => warn!(error = %e, "TxDefaultProfile not delivered"),
+                }
+            }
+            .in_current_span(),
+        );
     }
 
     async fn start_call(&mut self, call: OutboundCall) -> ControlFlow<()> {

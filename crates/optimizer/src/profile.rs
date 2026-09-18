@@ -75,6 +75,29 @@ impl StepProfile {
     /// The lower of the two profiles at every time from `from_secs` on, as a profile that
     /// starts at `from_secs`.
     pub fn pointwise_min(&self, other: &StepProfile, from_secs: i64) -> StepProfile {
+        self.combine(other, from_secs, f64::min)
+    }
+
+    /// The higher of the two profiles at every time from `from_secs` on, as a profile that
+    /// starts at `from_secs`.
+    pub fn pointwise_max(&self, other: &StepProfile, from_secs: i64) -> StepProfile {
+        self.combine(other, from_secs, f64::max)
+    }
+
+    /// The highest limit at any time from `from_secs` on.
+    pub fn peak_from(&self, from_secs: i64) -> f64 {
+        self.breakpoints()
+            .filter(|&t| t > from_secs)
+            .map(|t| self.value_at(t))
+            .fold(self.value_at(from_secs), f64::max)
+    }
+
+    fn combine(
+        &self,
+        other: &StepProfile,
+        from_secs: i64,
+        op: impl Fn(f64, f64) -> f64,
+    ) -> StepProfile {
         let mut times: Vec<i64> = self
             .breakpoints()
             .chain(other.breakpoints())
@@ -87,7 +110,7 @@ impl StepProfile {
             from_secs,
             times
                 .into_iter()
-                .map(|t| (t - from_secs, self.value_at(t).min(other.value_at(t)))),
+                .map(|t| (t - from_secs, op(self.value_at(t), other.value_at(t)))),
         )
     }
 
@@ -140,5 +163,27 @@ mod tests {
         // From 110: a=5,b=8 → 5; at 160: a=10,b=8 → 8; at 190: b=2 → 2.
         assert_eq!(m.start_secs, 110);
         assert_eq!(steps, vec![(0, 5.0), (50, 8.0), (80, 2.0)]);
+    }
+
+    #[test]
+    fn pointwise_max_takes_the_higher_step() {
+        let a = StepProfile::from_steps(100, [(0, 5.0), (60, 10.0)]);
+        let b = StepProfile::from_steps(130, [(0, 8.0), (60, 2.0)]);
+        let m = a.pointwise_max(&b, 110);
+        let steps: Vec<_> = m
+            .periods
+            .iter()
+            .map(|p| (p.start_offset_secs, p.limit_w))
+            .collect();
+        // From 110: a=5,b=8 → 8; at 160: a=10 → 10.
+        assert_eq!(steps, vec![(0, 8.0), (50, 10.0)]);
+    }
+
+    #[test]
+    fn peak_from_ignores_the_past() {
+        let p = StepProfile::from_steps(100, [(0, 9.0), (20, 1.0), (40, 4.0), (60, 0.0)]);
+        assert_eq!(p.peak_from(100), 9.0);
+        assert_eq!(p.peak_from(125), 4.0);
+        assert_eq!(p.peak_from(1_000), 0.0);
     }
 }

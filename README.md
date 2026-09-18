@@ -28,9 +28,18 @@ cargo run -p csms -- --listen 0.0.0.0:9000
 ```
 
 Stations connect to `ws://localhost:9000/ocpp/{stationId}` with the `ocpp2.0.1`
-subprotocol. `cargo run -p csms -- --help` lists the options (heartbeat interval, call
-timeout, id token allowlist); `RUST_LOG=csms=debug` logs every frame. The supported messages
-and connection rules are in [docs/ocpp-subset.md](docs/ocpp-subset.md).
+subprotocol. The CSMS tracks their sessions, plans the site every 30 s and after each event,
+and sends every EVSE its share of the grid limit as a charging profile:
+
+```sh
+cargo run -p csms -- --grid-limit-w 150000 --evse-max-w 22000 --scheduler edf
+```
+
+`cargo run -p csms -- --help` lists the options (site limits, scheduler, slot length and
+tick, heartbeat interval, call timeout, id token allowlist); `RUST_LOG=csms=debug` logs every
+frame and plan. The supported messages, the defaults for EVs that don't report their needs,
+and how the control loop stays within the limit are in
+[docs/ocpp-subset.md](docs/ocpp-subset.md).
 
 ## License
 
