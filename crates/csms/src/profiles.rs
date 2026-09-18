@@ -95,8 +95,10 @@ pub fn tx_profile(
 
 /// A TxDefaultProfile for the whole station: every EVSE draws at most `limit_w` from `start`
 /// until the CSMS sends it a TxProfile.
-// TODO(spec): that a TxDefaultProfile on evseId 0 limits each EVSE separately, rather than
-// the station as a whole, is how we read OCPP 2.0.1 Part 2 (K01); confirm it.
+///
+/// It is sent on `evseId` 0, which for a TxDefaultProfile "applies the profile to each
+/// individual evse" (the `evseId` description in the OCA schema), not to the station as a
+/// whole.
 pub fn tx_default_profile(limit_w: f64, start: DateTime) -> SetChargingProfileRequest {
     let schedule = ChargingSchedule {
         custom_data: None,

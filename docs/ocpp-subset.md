@@ -230,11 +230,15 @@ A default is only a guess, so it rolls forward instead of cutting the EV off:
   `crates/csms/src/station_id.rs`).
 - Part 4 says to close the connection when no subprotocol is agreed, but as far as we know
   it doesn't name a close code. 1002 (protocol error) is our choice.
-- A TxDefaultProfile on `evseId` 0 should limit each EVSE separately, not the station as a
-  whole (`crates/csms/src/profiles.rs`).
-- A SetChargingProfile whose id already exists on the station should replace that profile
-  (`crates/csms/src/profiles.rs`).
-- A sampled value without a `measurand` should be `Energy.Active.Import.Register`
-  (`crates/csms/src/meter.rs`).
-- A TransactionEventResponse should include `idTokenInfo` whenever the request has an
-  `idToken` (`crates/csms/src/transactions.rs`).
+- A SetChargingProfile whose id already exists on the station should replace that profile,
+  as we read Part 2 (marked `TODO(spec)` in `crates/csms/src/profiles.rs`).
+- The schema makes `idTokenInfo` in a TransactionEventResponse optional. We send it whenever
+  the request has an `idToken`; whether Part 2 expects that should be confirmed (marked
+  `TODO(spec)` in `crates/csms/src/transactions.rs`).
+
+Settled by the OCA schemas in [`specs/ocpp-2.0.1/`](../specs/ocpp-2.0.1/):
+
+- A TxDefaultProfile on `evseId` 0 limits each EVSE separately, not the station as a whole
+  (the `evseId` description in `SetChargingProfileRequest.json`).
+- A sampled value without a `measurand` is `Energy.Active.Import.Register` (the enum's
+  default in `TransactionEventRequest.json`).

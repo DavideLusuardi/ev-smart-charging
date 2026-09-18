@@ -43,8 +43,8 @@ pub(crate) fn transaction_event(
         }
     };
     let response = TransactionEventResponse {
-        // TODO(spec): OCPP 2.0.1 requires idTokenInfo when the request has an idToken, as we
-        // read the TransactionEventResponse description; confirm it.
+        // TODO(spec): the schema makes idTokenInfo optional; we send it whenever the request
+        // has an idToken, which is how we read Part 2; confirm that it is expected.
         id_token_info: req.id_token.as_ref().map(|t| id_token_info(config, t)),
         ..TransactionEventResponse::default()
     };

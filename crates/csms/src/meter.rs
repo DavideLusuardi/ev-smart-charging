@@ -17,9 +17,8 @@ pub(crate) struct Reading {
 /// Reads the most recent of `values`.
 ///
 /// Only whole-EVSE values count: a sampled value with a `phase` is one phase of the total.
-/// A sampled value without a measurand is an energy register reading, the OCPP default.
-// TODO(spec): the default measurand as we read OCPP 2.0.1 Part 2 (SampledValueType);
-// confirm it.
+/// A sampled value without a measurand is an energy register reading: the OCA schema gives
+/// `measurand` the default `Energy.Active.Import.Register`.
 pub(crate) fn latest(values: &[MeterValue]) -> Option<Reading> {
     let latest = values.iter().max_by_key(|v| v.timestamp)?;
     let mut reading = Reading {
