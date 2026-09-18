@@ -8,9 +8,11 @@
 mod charging_needs;
 pub mod clock;
 mod connection;
+pub mod control;
 pub mod handle;
 mod handlers;
 mod meter;
+pub mod profiles;
 pub mod registry;
 pub mod state;
 pub mod station_id;
@@ -23,11 +25,12 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::routing::get;
-use optimizer::NeedsDefaults;
+use optimizer::{ControlConfig, NeedsDefaults};
 use tokio::sync::Notify;
 
 pub use charging_needs::ReportedNeeds;
 pub use clock::Clock;
+pub use control::{ControlError, spawn_control_loop};
 pub use handle::{CallError, StationHandle};
 pub use registry::Registry;
 pub use state::SiteState;
@@ -48,6 +51,40 @@ pub struct Config {
     /// Id tokens that `Authorize` accepts; `None` accepts every token.
     pub id_token_allowlist: Option<HashSet<String>>,
     pub site: SiteConfig,
+    pub control: ControlSettings,
+}
+
+/// How the control loop plans and when it sends profiles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControlSettings {
+    /// The scheduling strategy, by name (see [`optimizer::SCHEDULERS`]).
+    pub scheduler: String,
+    pub slot_secs: u32,
+    /// How far ahead to plan, at most. A profile has one period per slot, and OCPP caps a
+    /// schedule at 1024 periods, so this is at most [`control::MAX_HORIZON_SLOTS`].
+    pub max_horizon_slots: usize,
+    /// Re-plan at least this often.
+    pub tick: Duration,
+    /// After an event, wait this long for more before planning, so a burst of events
+    /// leads to one plan.
+    pub debounce: Duration,
+    /// Which planned changes are big enough to send.
+    pub dispatch: ControlConfig,
+}
+
+impl Default for ControlSettings {
+    fn default() -> Self {
+        Self {
+            // In the offline simulator's runs so far, EDF does as well as the LP or better
+            // under a receding horizon, at a fraction of the cost.
+            scheduler: "edf".to_owned(),
+            slot_secs: 300,
+            max_horizon_slots: 144,
+            tick: Duration::from_secs(30),
+            debounce: Duration::from_secs(1),
+            dispatch: ControlConfig::default(),
+        }
+    }
 }
 
 /// The site's electrical setup.
@@ -89,6 +126,7 @@ impl Default for Config {
             call_queue_len: 32,
             id_token_allowlist: None,
             site: SiteConfig::default(),
+            control: ControlSettings::default(),
         }
     }
 }

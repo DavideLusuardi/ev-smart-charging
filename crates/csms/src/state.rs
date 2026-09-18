@@ -9,7 +9,7 @@ use ocpp::DateTime;
 use ocpp::messages::boot_notification::ChargingStation;
 use ocpp::messages::status_notification::ConnectorStatus;
 use ocpp::messages::transaction_event::ChargingState;
-use optimizer::{EvseRef, KnownNeeds, SessionState, StepProfile};
+use optimizer::{EvseRef, KnownNeeds, Plan, SessionState, StepProfile};
 
 use crate::charging_needs::ReportedNeeds;
 use crate::station_id::StationId;
@@ -19,6 +19,8 @@ use crate::station_id::StationId;
 pub struct SiteState {
     /// The site's grid limit.
     pub grid_limit_w: f64,
+    /// The control loop's latest plan.
+    pub latest_plan: Option<Plan>,
     stations: BTreeMap<StationId, StationState>,
     /// Sessions in progress, by transaction id.
     sessions: BTreeMap<String, Session>,
@@ -127,6 +129,7 @@ impl SiteState {
     pub fn new(grid_limit_w: f64) -> Self {
         Self {
             grid_limit_w,
+            latest_plan: None,
             stations: BTreeMap::new(),
             sessions: BTreeMap::new(),
             effective: BTreeMap::new(),

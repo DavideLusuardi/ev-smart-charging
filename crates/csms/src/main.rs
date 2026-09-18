@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use csms::{AppState, Config, SiteConfig};
+use clap::builder::PossibleValuesParser;
+use csms::{AppState, Config, ControlSettings, SiteConfig};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -36,6 +37,15 @@ struct Cli {
     /// What an EVSE may draw before it has a plan (its TxDefaultProfile), in W.
     #[arg(long, default_value_t = SiteConfig::default().fallback_limit_w)]
     fallback_limit_w: f64,
+    /// The scheduling strategy.
+    #[arg(long, default_value = "edf", value_parser = PossibleValuesParser::new(optimizer::SCHEDULERS))]
+    scheduler: String,
+    /// Length of a planning slot, in seconds.
+    #[arg(long, default_value_t = ControlSettings::default().slot_secs)]
+    slot_secs: u32,
+    /// Re-plan at least this often, in seconds.
+    #[arg(long, default_value_t = ControlSettings::default().tick.as_secs())]
+    tick_secs: u64,
 }
 
 #[tokio::main]
@@ -57,8 +67,15 @@ async fn main() -> Result<()> {
             fallback_limit_w: cli.fallback_limit_w,
             ..SiteConfig::default()
         },
+        control: ControlSettings {
+            scheduler: cli.scheduler,
+            slot_secs: cli.slot_secs,
+            tick: Duration::from_secs(cli.tick_secs),
+            ..ControlSettings::default()
+        },
         ..Config::default()
     });
+    csms::spawn_control_loop(state.clone()).context("invalid control settings")?;
     let listener = TcpListener::bind(cli.listen)
         .await
         .with_context(|| format!("cannot listen on {}", cli.listen))?;
