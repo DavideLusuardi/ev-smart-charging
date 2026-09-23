@@ -81,7 +81,9 @@ A `TransactionEvent` session is keyed by `transactionId` and planned once its EV
   `idToken`.
 
 Meter values are read from the most recent `meterValue` of the event, using only whole-EVSE
-sampled values (no `phase`), in `Wh`/`kWh` and `W`/`kW` with the unit's `multiplier`:
+sampled values (no `phase`), in `Wh`/`kWh` and `W`/`kW` with the unit's `multiplier`. A value
+measured at the outlet (the default `location`) wins over one measured elsewhere, such as at
+the inlet:
 
 | Measurand | Use |
 |---|---|
