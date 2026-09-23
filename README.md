@@ -93,7 +93,7 @@ Options:
 | Option | Default | Meaning |
 |---|---|---|
 | `--scenario` | required | `workplace`, `hub`, or the path to a scenario file |
-| `--scheduler` | required | `equal`, `edf` or `lp` |
+| `--scheduler` | required | `equal`, `edf` or `lp` (`lp` needs the `lp` feature, on by default) |
 | `--seed` | 1 | Seed for the arrivals: the same seed gives the same EVs |
 | `--days` | 1 | Days of arrivals; the run continues until the last EV has left |
 | `--iso15118-share` | the scenario's | Share of EVs (0 to 1) that report their needs; the others get the defaults |
@@ -134,15 +134,17 @@ with their departure time, remaining energy and max power, and the idle EVSEs) a
 
 1. reserves each idle EVSE's fallback limit, so an EV that plugs in before the next plan
    can't push the site over its limit;
-2. splits time into fixed slots (5 min by default) from now up to the latest departure,
-   capped at 144 slots (12 h; OCPP allows at most 1024 periods per profile);
+2. splits time into fixed slots (5 min by default in the CSMS) from now up to the latest
+   departure, capped at 144 slots (12 h; OCPP allows at most 1024 periods per profile);
 3. asks a **scheduler** for a power per session and slot, within the site capacity, each
    EV's max power and its remaining energy;
 4. turns each session's row into a step charging profile that ends with 0 W at departure.
 
-Only the start of each plan is really used: the next tick (every 30 s, and after each
-event) plans again from the new state (receding horizon), so arrivals, early departures and
-wrong estimates are corrected within one tick.
+Only the start of each plan is really used: the next tick (every 30 s in the CSMS, and after
+each event) plans again from the new state (receding horizon), so arrivals, early departures
+and wrong estimates are corrected within one tick. The simulator takes the slot length,
+horizon and tick from the scenario: the `workplace` preset plans 5 min slots every 5 min, the
+`hub` preset 1 min slots every minute, both also after each arrival, departure and full EV.
 
 ### Schedulers
 
