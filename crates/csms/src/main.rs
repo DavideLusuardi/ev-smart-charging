@@ -19,10 +19,10 @@ struct Cli {
     #[arg(long, default_value = "0.0.0.0:9000")]
     listen: SocketAddr,
     /// Heartbeat interval given to stations at boot, in seconds.
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = Config::default().heartbeat_interval.as_secs())]
     heartbeat_interval: u64,
     /// Seconds a station has to answer a CALL from the CSMS.
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = Config::default().call_timeout.as_secs())]
     call_timeout: u64,
     /// Accept only this id token in Authorize (repeat for more). Without it, every token is
     /// accepted.
