@@ -27,6 +27,9 @@ pub struct SiteState {
     /// The TxProfile each EVSE last accepted. An EVSE without one follows its
     /// TxDefaultProfile.
     effective: BTreeMap<EvseRef, StepProfile>,
+    /// EVSEs whose effective profile is only an upper bound, because an update went
+    /// unanswered: the EVSE follows either its old profile or the new one.
+    uncertain: BTreeSet<EvseRef>,
     /// Needs reported on an EVSE before its transaction started.
     pending_needs: BTreeMap<EvseRef, ReportedNeeds>,
 }
@@ -133,6 +136,7 @@ impl SiteState {
             stations: BTreeMap::new(),
             sessions: BTreeMap::new(),
             effective: BTreeMap::new(),
+            uncertain: BTreeSet::new(),
             pending_needs: BTreeMap::new(),
         }
     }
@@ -210,6 +214,7 @@ impl SiteState {
     pub fn end_session(&mut self, transaction_id: &str) -> Option<Session> {
         let session = self.sessions.remove(transaction_id)?;
         self.effective.remove(&session.evse);
+        self.uncertain.remove(&session.evse);
         Some(session)
     }
 
@@ -238,15 +243,28 @@ impl SiteState {
 
     /// Records that an EVSE accepted a TxProfile.
     pub fn set_effective(&mut self, evse: EvseRef, profile: StepProfile) {
+        self.uncertain.remove(&evse);
         self.effective.insert(evse, profile);
     }
 
-    /// The limit an EVSE follows at unix time `t_secs`: its TxProfile, or `fallback_w`
-    /// (its TxDefaultProfile) without one.
-    pub fn limit_at(&self, evse: &EvseRef, t_secs: i64, fallback_w: f64) -> f64 {
-        self.effective
-            .get(evse)
-            .map_or(fallback_w, |p| p.value_at(t_secs))
+    /// Records that an EVSE follows at most `bound`, without knowing its exact limit.
+    pub fn set_effective_bound(&mut self, evse: EvseRef, bound: StepProfile) {
+        self.uncertain.insert(evse.clone());
+        self.effective.insert(evse, bound);
+    }
+
+    /// The limit an EVSE followed at unix time `t_secs`: its TxProfile, or `fallback_w` (its
+    /// TxDefaultProfile) without one. `None` when the CSMS can't tell: the last update went
+    /// unanswered, or `t_secs` is before the TxProfile started, under an earlier limit.
+    pub fn known_limit_at(&self, evse: &EvseRef, t_secs: i64, fallback_w: f64) -> Option<f64> {
+        if self.uncertain.contains(evse) {
+            return None;
+        }
+        match self.effective.get(evse) {
+            Some(p) if t_secs < p.start_secs => None,
+            Some(p) => Some(p.value_at(t_secs)),
+            None => Some(fallback_w),
+        }
     }
 }
 
@@ -273,7 +291,10 @@ mod tests {
         let ids: Vec<_> = site.sessions().map(|s| s.transaction_id.as_str()).collect();
         assert_eq!(ids, ["b", "c"]);
         assert!(site.effective_profiles().is_empty());
-        assert_eq!(site.limit_at(&evse("CS1", 1), 0, 1_400.0), 1_400.0);
+        assert_eq!(
+            site.known_limit_at(&evse("CS1", 1), 0, 1_400.0),
+            Some(1_400.0)
+        );
     }
 
     #[test]

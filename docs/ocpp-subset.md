@@ -93,7 +93,9 @@ the inlet:
 An EV that draws clearly less than its limit (by 5 % or 500 W, whichever is more) is
 limiting itself, so the planner stops reserving more for it and plans it at that draw plus the
 same margin. It is only learned while `chargingState` is `Charging`: an EV that is merely
-plugged in draws nothing. `SuspendedEV` marks the EV as full, so it needs nothing more until it
+plugged in draws nothing. It is also only learned when the CSMS knows the limit the reading
+was taken under: not from a reading older than the EVSE's current TxProfile, nor while a
+profile update to the EVSE is unanswered. `SuspendedEV` marks the EV as full, so it needs nothing more until it
 charges again. `SuspendedEVSE` changes nothing: that is the station obeying a 0 W limit.
 
 ## Charging needs

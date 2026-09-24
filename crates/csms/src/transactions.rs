@@ -91,14 +91,15 @@ fn start(
 fn update(config: &Config, site: &mut SiteState, req: &TransactionEventRequest) -> bool {
     let tx = req.transaction_info.transaction_id.as_str();
     let reading = req.meter_value.as_deref().and_then(meter::latest);
-    // The limit the EV was under when the reading was taken, before borrowing the session.
+    // The limit the EV was under when the reading was taken, if the CSMS knows it, before
+    // borrowing the session.
     let limit_w = reading.and_then(|r| {
         let session = site.session(tx)?;
-        let limit = site.limit_at(
+        let limit = site.known_limit_at(
             &session.evse,
             r.timestamp.timestamp(),
             config.site.fallback_limit_w,
-        );
+        )?;
         Some(limit.min(config.site.evse_max_w))
     });
     let session = site.session_mut(tx).expect("the session exists");
@@ -301,6 +302,37 @@ mod tests {
         send(
             &mut site,
             charging("2026-09-30T10:10:00Z", 2_000.0, 11_000.0),
+        );
+        assert_eq!(site.session(TX).unwrap().observed_max_w, Some(11_000.0));
+    }
+
+    #[test]
+    fn draws_under_an_unknown_limit_teach_nothing() {
+        let mut site = new_site();
+        started(&mut site);
+        // The 22 kW profile starts at 10:10; a reading from before it was taken under the
+        // fallback, not under 22 kW.
+        let at_1010 = 1_790_763_000; // 2026-09-30T10:10:00Z
+        site.set_effective(evse1(), StepProfile::constant(at_1010, 22_000.0));
+        send(
+            &mut site,
+            charging("2026-09-30T10:09:55Z", 1_100.0, 1_400.0),
+        );
+        assert_eq!(site.session(TX).unwrap().observed_max_w, None);
+
+        // An unanswered update leaves the EVSE on 1.4 kW or 22 kW: no telling which.
+        site.set_effective_bound(evse1(), StepProfile::constant(0, 22_000.0));
+        send(
+            &mut site,
+            charging("2026-09-30T10:20:00Z", 1_300.0, 1_400.0),
+        );
+        assert_eq!(site.session(TX).unwrap().observed_max_w, None);
+
+        // Once a profile is accepted, draws teach again.
+        site.set_effective(evse1(), StepProfile::constant(0, 22_000.0));
+        send(
+            &mut site,
+            charging("2026-09-30T10:30:00Z", 3_000.0, 11_000.0),
         );
         assert_eq!(site.session(TX).unwrap().observed_max_w, Some(11_000.0));
     }

@@ -227,7 +227,10 @@ impl Controller {
                     .get(&update.evse)
                     .cloned()
                     .unwrap_or_else(|| StepProfile::constant(now, fallback));
-                site.set_effective(update.evse.clone(), old.pointwise_max(&update.profile, now));
+                site.set_effective_bound(
+                    update.evse.clone(),
+                    old.pointwise_max(&update.profile, now),
+                );
                 false
             }
         }
