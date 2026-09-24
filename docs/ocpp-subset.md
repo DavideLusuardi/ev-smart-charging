@@ -83,11 +83,12 @@ A `TransactionEvent` session is keyed by `transactionId` and planned once its EV
 Meter values are read from the most recent `meterValue` of the event, using only whole-EVSE
 sampled values (no `phase`), in `Wh`/`kWh` and `W`/`kW` with the unit's `multiplier`. A value
 measured at the outlet (the default `location`) wins over one measured elsewhere, such as at
-the inlet:
+the inlet. A reading older than the last one applied, from an event the station queued while
+offline, is ignored:
 
 | Measurand | Use |
 |---|---|
-| `Energy.Active.Import.Register` (also a value with no measurand) | Delivered energy, counted from the first reading of the transaction |
+| `Energy.Active.Import.Register` (also a value with no measurand) | Delivered energy, counted from the first reading of the transaction (so a `Started` event without a reading leaves out what was delivered before the first one) |
 | `Power.Active.Import` | The power drawn, which teaches the EV's own max power |
 
 An EV that draws clearly less than its limit (by 5 % or 500 W, whichever is more) is

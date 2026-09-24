@@ -83,6 +83,8 @@ pub struct Session {
     pub meter_start_wh: Option<f64>,
     /// Energy delivered so far.
     pub delivered_wh: f64,
+    /// When the last meter reading applied was taken.
+    pub last_reading: Option<DateTime>,
     /// The last reported power.
     pub power_w: Option<f64>,
     /// The last reported charging state.
@@ -104,6 +106,7 @@ impl Session {
             started,
             meter_start_wh: None,
             delivered_wh: 0.0,
+            last_reading: None,
             power_w: None,
             charging_state: None,
             needs: None,

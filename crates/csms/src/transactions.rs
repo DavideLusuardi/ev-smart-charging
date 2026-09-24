@@ -90,7 +90,17 @@ fn start(
 /// being full, which changes what it needs.
 fn update(config: &Config, site: &mut SiteState, req: &TransactionEventRequest) -> bool {
     let tx = req.transaction_info.transaction_id.as_str();
-    let reading = req.meter_value.as_deref().and_then(meter::latest);
+    // A reading older than one already applied (an event queued while the station was
+    // offline) would move the delivered energy backwards.
+    let reading = req
+        .meter_value
+        .as_deref()
+        .and_then(meter::latest)
+        .filter(|r| {
+            site.session(tx)
+                .and_then(|s| s.last_reading)
+                .is_none_or(|last| r.timestamp >= last)
+        });
     // The limit the EV was under when the reading was taken, if the CSMS knows it, before
     // borrowing the session.
     let limit_w = reading.and_then(|r| {
@@ -122,6 +132,7 @@ fn update(config: &Config, site: &mut SiteState, req: &TransactionEventRequest) 
     }
 
     if let Some(reading) = reading {
+        session.last_reading = Some(reading.timestamp);
         if let Some(energy_wh) = reading.energy_wh {
             let start_wh = *session.meter_start_wh.get_or_insert(energy_wh);
             session.delivered_wh = (energy_wh - start_wh).max(0.0);
@@ -242,6 +253,24 @@ mod tests {
         assert!(site.effective_profiles().is_empty());
         // An end the CSMS didn't track changes nothing.
         assert!(!send(&mut site, event("Ended", json!({}))));
+    }
+
+    #[test]
+    fn older_readings_are_ignored() {
+        let mut site = new_site();
+        started(&mut site);
+        send(
+            &mut site,
+            charging("2026-09-30T10:30:00Z", 6_500.0, 11_000.0),
+        );
+        // Queued while the station was offline, and sent after the newer one.
+        send(
+            &mut site,
+            charging("2026-09-30T10:20:00Z", 4_000.0, 7_000.0),
+        );
+        let s = site.session(TX).unwrap();
+        assert_eq!(s.delivered_wh, 5_500.0);
+        assert_eq!(s.power_w, Some(11_000.0));
     }
 
     #[test]
