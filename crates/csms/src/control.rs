@@ -48,6 +48,8 @@ pub enum ControlError {
     HorizonTooLong(usize),
     #[error("slot_secs must be positive")]
     ZeroSlot,
+    #[error("the tick must be positive")]
+    ZeroTick,
 }
 
 /// Starts the control loop on its own task.
@@ -80,6 +82,10 @@ impl Controller {
             .ok_or_else(|| ControlError::UnknownScheduler(settings.scheduler.clone()))?;
         if settings.slot_secs == 0 {
             return Err(ControlError::ZeroSlot);
+        }
+        // A zero tick would plan back to back, holding the site lock most of the time.
+        if settings.tick.is_zero() {
+            return Err(ControlError::ZeroTick);
         }
         if settings.max_horizon_slots > MAX_HORIZON_SLOTS {
             return Err(ControlError::HorizonTooLong(settings.max_horizon_slots));
@@ -349,6 +355,13 @@ mod tests {
                 ..ControlSettings::default()
             }),
             Some(ControlError::ZeroSlot)
+        );
+        assert_eq!(
+            with(ControlSettings {
+                tick: std::time::Duration::ZERO,
+                ..ControlSettings::default()
+            }),
+            Some(ControlError::ZeroTick)
         );
     }
 }
