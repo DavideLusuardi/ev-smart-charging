@@ -122,7 +122,9 @@ The CSMS sends two kinds of profile, both with `stackLevel` 0 and `chargingRateU
 - **`TxDefaultProfile`**, right after an accepted `BootNotification`: `evseId` 0, id 1,
   `Absolute` from the boot time, one period at the fallback limit (1.4 kW by default). Every
   EVSE of the station stays within that until it gets a plan, and falls back to it if the
-  CSMS goes away.
+  CSMS goes away. If the station rejects it or doesn't answer, the CSMS assumes its EVSEs may
+  draw their full rating until they get a TxProfile, until a later boot's TxDefaultProfile is
+  accepted.
 - **`TxProfile`** for each running transaction: `Absolute`, the `transactionId` set, id
   `100 + evseId` so each new profile replaces the one before, `startSchedule` = the planning
   time, and one `chargingSchedulePeriod` per change in the planned limit. The last period is
@@ -140,7 +142,8 @@ as the offline simulator:
   ends, charging needs arrive for a running session, an EV becomes full or charges again, a
   new EVSE is reported, or a station disconnects. The 1 s turns a burst of events into one plan.
 - **Input:** each session's needs, reported or assumed. The planner's capacity is the grid
-  limit minus the fallback limit of every idle EVSE, which may start drawing it at any moment.
+  limit minus the fallback limit of every idle EVSE, which may start drawing it at any moment
+  (the full rating on a station without a TxDefaultProfile).
   Sessions on a disconnected station can't be steered: their highest future limit is taken
   off the capacity and they are left out of the plan.
 - **Threshold:** a new profile is only sent when, at some point, it differs from the one in

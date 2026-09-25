@@ -164,6 +164,13 @@ impl Controller {
         let mut sessions = Vec::new();
         let mut effective = BTreeMap::new();
         let mut reserved_w = 0.0;
+        let default_limit_w = |evse: &EvseRef| {
+            site.default_limit_w(
+                &evse.station_id,
+                site_config.fallback_limit_w,
+                site_config.evse_max_w,
+            )
+        };
         for session in site.sessions() {
             let profile = site.effective_profiles().get(&session.evse);
             if self.is_connected(&session.evse) {
@@ -172,15 +179,30 @@ impl Controller {
                     settings.slot_secs,
                     &site_config.needs_defaults,
                 ));
-                if let Some(p) = profile {
-                    effective.insert(session.evse.clone(), p.clone());
+                // Without a TxProfile, a station that refused its TxDefaultProfile lets the
+                // EV draw the full rating.
+                let current = profile.cloned().or_else(|| {
+                    let limit_w = default_limit_w(&session.evse);
+                    (limit_w != site_config.fallback_limit_w)
+                        .then(|| StepProfile::constant(now, limit_w))
+                });
+                if let Some(p) = current {
+                    effective.insert(session.evse.clone(), p);
                 }
             } else {
-                reserved_w += profile.map_or(site_config.fallback_limit_w, |p| p.peak_from(now));
+                reserved_w += profile.map_or(default_limit_w(&session.evse), |p| p.peak_from(now));
             }
         }
         let busy: BTreeSet<&EvseRef> = site.sessions().map(|s| &s.evse).collect();
-        let idle_evses = site.evses().iter().filter(|e| !busy.contains(e)).count();
+        let mut idle_evses = 0;
+        for evse in site.evses().iter().filter(|e| !busy.contains(e)) {
+            let limit_w = default_limit_w(evse);
+            if limit_w == site_config.fallback_limit_w {
+                idle_evses += 1;
+            } else {
+                reserved_w += limit_w;
+            }
+        }
         let request = PlanRequest {
             now_secs: now,
             slot_secs: settings.slot_secs,
@@ -327,6 +349,34 @@ mod tests {
         assert_eq!(request.idle_evses, 2);
         // The 22 kW step is over; 7 kW for b, the 1.4 kW fallback for c.
         assert_eq!(request.capacity_w, 100_000.0 - 7_000.0 - 1_400.0);
+    }
+
+    /// CS1 refused its TxDefaultProfile: its idle EVSE 2 and its session on EVSE 1, which
+    /// has no TxProfile yet, may both draw the full 22 kW.
+    #[tokio::test]
+    async fn stations_without_a_tx_default_profile_are_reserved_at_full_rating() {
+        let c = controller();
+        let cs1 = StationId::try_from("CS1").unwrap();
+        let _registration = c.state.registry.register(
+            cs1.clone(),
+            StationHandle::new(tokio::sync::mpsc::channel(1).0),
+        );
+        let now = c.state.clock.now_secs();
+        {
+            let mut site = c.state.site();
+            let t = DateTime::now();
+            site.touch(&cs1, t).evses.insert(2, EvseState::default());
+            site.start_session(Session::new("a", evse("CS1", 1), t));
+            assert!(site.set_tx_default_refused(&cs1, true));
+        }
+
+        let (request, effective) = c.request(now);
+        assert_eq!(request.idle_evses, 0);
+        assert_eq!(request.capacity_w, 100_000.0 - 22_000.0);
+        assert_eq!(
+            effective[&evse("CS1", 1)],
+            StepProfile::constant(now, 22_000.0)
+        );
     }
 
     #[test]

@@ -159,14 +159,28 @@ impl Connection {
             self.state.config.site.fallback_limit_w,
             self.state.clock.now(),
         );
+        let state = self.state.clone();
+        let station = self.station.clone();
         tokio::spawn(
             async move {
-                match handle.call::<SetChargingProfile>(&request).await {
+                let accepted = match handle.call::<SetChargingProfile>(&request).await {
                     Ok(r) if r.status == ChargingProfileStatus::Accepted => {
                         debug!("TxDefaultProfile accepted");
+                        true
                     }
-                    Ok(r) => warn!(info = ?r.status_info, "TxDefaultProfile rejected"),
-                    Err(e) => warn!(error = %e, "TxDefaultProfile not delivered"),
+                    Ok(r) => {
+                        warn!(info = ?r.status_info, "TxDefaultProfile rejected");
+                        false
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "TxDefaultProfile not delivered");
+                        false
+                    }
+                };
+                // Without it, the station's EVSEs may draw their full rating before their
+                // first plan, and the planner must keep that much free.
+                if state.site().set_tx_default_refused(&station, !accepted) {
+                    state.replan.notify_one();
                 }
             }
             .in_current_span(),
@@ -450,6 +464,29 @@ mod tests {
             call.await.unwrap(),
             Err(CallError::Decode(e)) if e.code == ErrorCode::PropertyConstraintViolation
         ));
+    }
+
+    #[tokio::test]
+    async fn a_refused_tx_default_profile_is_recorded() {
+        let mut h = start("CS1");
+        let boot = r#"[2,"1","BootNotification",{"reason":"PowerUp",
+            "chargingStation":{"model":"M","vendorName":"V"}}]"#;
+        assert_eq!(h.exchange(boot).await[0], 3);
+        let call = h.recv().await;
+        assert_eq!(call[2], "SetChargingProfile");
+        let id = call[1].as_str().unwrap();
+        h.send(&format!(r#"[3,"{id}",{{"status":"Rejected"}}]"#))
+            .await;
+
+        let station = StationId::try_from("CS1").unwrap();
+        let refused = || h.state.site().station(&station).unwrap().tx_default_refused;
+        timeout(Duration::from_secs(5), async {
+            while !refused() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the refusal is recorded");
     }
 
     #[tokio::test]

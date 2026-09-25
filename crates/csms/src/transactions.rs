@@ -105,11 +105,12 @@ fn update(config: &Config, site: &mut SiteState, req: &TransactionEventRequest) 
     // borrowing the session.
     let limit_w = reading.and_then(|r| {
         let session = site.session(tx)?;
-        let limit = site.known_limit_at(
-            &session.evse,
-            r.timestamp.timestamp(),
+        let default_w = site.default_limit_w(
+            &session.evse.station_id,
             config.site.fallback_limit_w,
-        )?;
+            config.site.evse_max_w,
+        );
+        let limit = site.known_limit_at(&session.evse, r.timestamp.timestamp(), default_w)?;
         Some(limit.min(config.site.evse_max_w))
     });
     let session = site.session_mut(tx).expect("the session exists");

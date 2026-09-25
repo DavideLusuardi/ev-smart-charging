@@ -43,6 +43,9 @@ pub struct StationState {
     pub last_seen: DateTime,
     /// EVSEs by id, as reported in `StatusNotification`s.
     pub evses: BTreeMap<i32, EvseState>,
+    /// The station refused its last TxDefaultProfile or didn't answer, so its EVSEs may
+    /// draw their full rating until they get a TxProfile.
+    pub tx_default_refused: bool,
 }
 
 /// A station's identification from `BootNotification`.
@@ -153,7 +156,25 @@ impl SiteState {
                 info: None,
                 last_seen: now,
                 evses: BTreeMap::new(),
+                tx_default_refused: false,
             })
+    }
+
+    /// Records whether a station refused its TxDefaultProfile. Returns whether that changed.
+    pub fn set_tx_default_refused(&mut self, id: &StationId, refused: bool) -> bool {
+        self.stations
+            .get_mut(id)
+            .is_some_and(|s| std::mem::replace(&mut s.tx_default_refused, refused) != refused)
+    }
+
+    /// What an EVSE of the station may draw without a TxProfile: `fallback_w` (its
+    /// TxDefaultProfile), or `evse_max_w` if the station refused that profile.
+    pub fn default_limit_w(&self, station_id: &str, fallback_w: f64, evse_max_w: f64) -> f64 {
+        let refused = StationId::try_from(station_id)
+            .ok()
+            .and_then(|id| self.stations.get(&id))
+            .is_some_and(|s| s.tx_default_refused);
+        if refused { evse_max_w } else { fallback_w }
     }
 
     /// One station, if it has ever connected.
