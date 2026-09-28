@@ -27,6 +27,9 @@ pub struct SiteState {
     /// The TxProfile each EVSE last accepted. An EVSE without one follows its
     /// TxDefaultProfile.
     effective: BTreeMap<EvseRef, StepProfile>,
+    /// EVSEs whose effective profile is only an upper bound, because an update went
+    /// unanswered: the EVSE follows either its old profile or the new one.
+    uncertain: BTreeSet<EvseRef>,
     /// Needs reported on an EVSE before its transaction started.
     pending_needs: BTreeMap<EvseRef, ReportedNeeds>,
 }
@@ -40,6 +43,9 @@ pub struct StationState {
     pub last_seen: DateTime,
     /// EVSEs by id, as reported in `StatusNotification`s.
     pub evses: BTreeMap<i32, EvseState>,
+    /// The station refused its last TxDefaultProfile or didn't answer, so its EVSEs may
+    /// draw their full rating until they get a TxProfile.
+    pub tx_default_refused: bool,
 }
 
 /// A station's identification from `BootNotification`.
@@ -80,6 +86,8 @@ pub struct Session {
     pub meter_start_wh: Option<f64>,
     /// Energy delivered so far.
     pub delivered_wh: f64,
+    /// When the last meter reading applied was taken.
+    pub last_reading: Option<DateTime>,
     /// The last reported power.
     pub power_w: Option<f64>,
     /// The last reported charging state.
@@ -101,6 +109,7 @@ impl Session {
             started,
             meter_start_wh: None,
             delivered_wh: 0.0,
+            last_reading: None,
             power_w: None,
             charging_state: None,
             needs: None,
@@ -133,6 +142,7 @@ impl SiteState {
             stations: BTreeMap::new(),
             sessions: BTreeMap::new(),
             effective: BTreeMap::new(),
+            uncertain: BTreeSet::new(),
             pending_needs: BTreeMap::new(),
         }
     }
@@ -146,7 +156,25 @@ impl SiteState {
                 info: None,
                 last_seen: now,
                 evses: BTreeMap::new(),
+                tx_default_refused: false,
             })
+    }
+
+    /// Records whether a station refused its TxDefaultProfile. Returns whether that changed.
+    pub fn set_tx_default_refused(&mut self, id: &StationId, refused: bool) -> bool {
+        self.stations
+            .get_mut(id)
+            .is_some_and(|s| std::mem::replace(&mut s.tx_default_refused, refused) != refused)
+    }
+
+    /// What an EVSE of the station may draw without a TxProfile: `fallback_w` (its
+    /// TxDefaultProfile), or `evse_max_w` if the station refused that profile.
+    pub fn default_limit_w(&self, station_id: &str, fallback_w: f64, evse_max_w: f64) -> f64 {
+        let refused = StationId::try_from(station_id)
+            .ok()
+            .and_then(|id| self.stations.get(&id))
+            .is_some_and(|s| s.tx_default_refused);
+        if refused { evse_max_w } else { fallback_w }
     }
 
     /// One station, if it has ever connected.
@@ -210,6 +238,7 @@ impl SiteState {
     pub fn end_session(&mut self, transaction_id: &str) -> Option<Session> {
         let session = self.sessions.remove(transaction_id)?;
         self.effective.remove(&session.evse);
+        self.uncertain.remove(&session.evse);
         Some(session)
     }
 
@@ -238,15 +267,28 @@ impl SiteState {
 
     /// Records that an EVSE accepted a TxProfile.
     pub fn set_effective(&mut self, evse: EvseRef, profile: StepProfile) {
+        self.uncertain.remove(&evse);
         self.effective.insert(evse, profile);
     }
 
-    /// The limit an EVSE follows at unix time `t_secs`: its TxProfile, or `fallback_w`
-    /// (its TxDefaultProfile) without one.
-    pub fn limit_at(&self, evse: &EvseRef, t_secs: i64, fallback_w: f64) -> f64 {
-        self.effective
-            .get(evse)
-            .map_or(fallback_w, |p| p.value_at(t_secs))
+    /// Records that an EVSE follows at most `bound`, without knowing its exact limit.
+    pub fn set_effective_bound(&mut self, evse: EvseRef, bound: StepProfile) {
+        self.uncertain.insert(evse.clone());
+        self.effective.insert(evse, bound);
+    }
+
+    /// The limit an EVSE followed at unix time `t_secs`: its TxProfile, or `fallback_w` (its
+    /// TxDefaultProfile) without one. `None` when the CSMS can't tell: the last update went
+    /// unanswered, or `t_secs` is before the TxProfile started, under an earlier limit.
+    pub fn known_limit_at(&self, evse: &EvseRef, t_secs: i64, fallback_w: f64) -> Option<f64> {
+        if self.uncertain.contains(evse) {
+            return None;
+        }
+        match self.effective.get(evse) {
+            Some(p) if t_secs < p.start_secs => None,
+            Some(p) => Some(p.value_at(t_secs)),
+            None => Some(fallback_w),
+        }
     }
 }
 
@@ -273,7 +315,10 @@ mod tests {
         let ids: Vec<_> = site.sessions().map(|s| s.transaction_id.as_str()).collect();
         assert_eq!(ids, ["b", "c"]);
         assert!(site.effective_profiles().is_empty());
-        assert_eq!(site.limit_at(&evse("CS1", 1), 0, 1_400.0), 1_400.0);
+        assert_eq!(
+            site.known_limit_at(&evse("CS1", 1), 0, 1_400.0),
+            Some(1_400.0)
+        );
     }
 
     #[test]

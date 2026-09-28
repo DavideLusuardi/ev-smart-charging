@@ -1,7 +1,7 @@
 //! Reading energy and power out of OCPP meter values.
 
 use ocpp::DateTime;
-use ocpp::types::{Measurand, MeterValue, SampledValue};
+use ocpp::types::{Location, Measurand, MeterValue, SampledValue};
 use tracing::debug;
 
 /// What one meter value says about a session.
@@ -17,9 +17,10 @@ pub(crate) struct Reading {
 /// Reads the most recent of `values`.
 ///
 /// Only whole-EVSE values count: a sampled value with a `phase` is one phase of the total.
-/// A sampled value without a measurand is an energy register reading, the OCPP default.
-// TODO(spec): the default measurand as we read OCPP 2.0.1 Part 2 (SampledValueType);
-// confirm it.
+/// A value at the outlet (the default location) wins over one measured elsewhere, such as at
+/// the inlet, so a station reporting both doesn't mix them up.
+/// A sampled value without a measurand is an energy register reading: the OCA schema gives
+/// `measurand` the default `Energy.Active.Import.Register`.
 pub(crate) fn latest(values: &[MeterValue]) -> Option<Reading> {
     let latest = values.iter().max_by_key(|v| v.timestamp)?;
     let mut reading = Reading {
@@ -28,17 +29,17 @@ pub(crate) fn latest(values: &[MeterValue]) -> Option<Reading> {
         power_w: None,
     };
     for sample in latest.sampled_value.iter().filter(|s| s.phase.is_none()) {
-        match sample
+        let at_outlet = sample.location.is_none_or(|l| l == Location::Outlet);
+        let (value, base, kilo) = match sample
             .measurand
             .unwrap_or(Measurand::EnergyActiveImportRegister)
         {
-            Measurand::EnergyActiveImportRegister => {
-                reading.energy_wh = scaled(sample, "Wh", "kWh").or(reading.energy_wh);
-            }
-            Measurand::PowerActiveImport => {
-                reading.power_w = scaled(sample, "W", "kW").or(reading.power_w);
-            }
-            _ => {}
+            Measurand::EnergyActiveImportRegister => (&mut reading.energy_wh, "Wh", "kWh"),
+            Measurand::PowerActiveImport => (&mut reading.power_w, "W", "kW"),
+            _ => continue,
+        };
+        if at_outlet || value.is_none() {
+            *value = scaled(sample, base, kilo).or(*value);
         }
     }
     Some(reading)
@@ -107,6 +108,30 @@ mod tests {
         let r = latest(&v).unwrap();
         assert_eq!(r.energy_wh, Some(26_500.0));
         assert_eq!(r.power_w, Some(11_000.0));
+    }
+
+    #[test]
+    fn outlet_values_win_over_other_locations() {
+        let v = values(json!([{
+            "timestamp": "2026-09-30T10:00:00Z",
+            "sampledValue": [
+                { "value": 26_000.0, "location": "Outlet" },
+                { "value": 27_000.0, "location": "Inlet" },
+                { "value": 11_500.0, "measurand": "Power.Active.Import", "location": "Inlet" },
+                // No location: the outlet.
+                { "value": 11_000.0, "measurand": "Power.Active.Import" }
+            ]
+        }]));
+        let r = latest(&v).unwrap();
+        assert_eq!(r.energy_wh, Some(26_000.0));
+        assert_eq!(r.power_w, Some(11_000.0));
+
+        // A station that only meters its inlet is still read.
+        let v = values(json!([{
+            "timestamp": "2026-09-30T10:00:00Z",
+            "sampledValue": [{ "value": 27_000.0, "location": "Inlet" }]
+        }]));
+        assert_eq!(latest(&v).unwrap().energy_wh, Some(27_000.0));
     }
 
     #[test]

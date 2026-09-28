@@ -5,6 +5,8 @@
 //! ([`Planner`] and [`dispatch`]); this module only gathers the input and talks to the
 //! stations. Profiles go out in two phases so the grid limit holds while stations accept
 //! them in any order: first the pure decreases, then, once every one is accepted, the rest.
+//! When some decreases are not accepted, the increases for the other EVSEs still go out if
+//! they fit with those EVSEs on their current profiles.
 //!
 //! The CSMS keeps, per EVSE, the profile it believes the station follows (its *effective*
 //! profile), and stays on the safe side when it can't be sure:
@@ -23,8 +25,8 @@ use futures_util::future::join_all;
 use ocpp::messages::SetChargingProfile;
 use ocpp::messages::set_charging_profile::ChargingProfileStatus;
 use optimizer::{
-    EvseRef, PlanRequest, Planner, ProfileUpdate, Scheduler, StepProfile, dispatch,
-    scheduler_by_name,
+    EvseRef, HeldSession, PlanRequest, Planner, ProfileUpdate, Scheduler, StepProfile, dispatch,
+    scheduler_by_name, within_capacity,
 };
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, info, info_span, warn};
@@ -48,6 +50,8 @@ pub enum ControlError {
     HorizonTooLong(usize),
     #[error("slot_secs must be positive")]
     ZeroSlot,
+    #[error("the tick must be positive")]
+    ZeroTick,
 }
 
 /// Starts the control loop on its own task.
@@ -80,6 +84,10 @@ impl Controller {
             .ok_or_else(|| ControlError::UnknownScheduler(settings.scheduler.clone()))?;
         if settings.slot_secs == 0 {
             return Err(ControlError::ZeroSlot);
+        }
+        // A zero tick would plan back to back, holding the site lock most of the time.
+        if settings.tick.is_zero() {
+            return Err(ControlError::ZeroTick);
         }
         if settings.max_horizon_slots > MAX_HORIZON_SLOTS {
             return Err(ControlError::HorizonTooLong(settings.max_horizon_slots));
@@ -143,11 +151,51 @@ impl Controller {
             increases = updates.phase2.len(),
             "sending profiles"
         );
-        if !self.push(now, &updates.phase1).await {
-            warn!("not every decrease was accepted; increases wait for the next plan");
+        let failed = self.push(now, &updates.phase1).await;
+        if failed.is_empty() {
+            self.push(now, &updates.phase2).await;
             return;
         }
-        self.push(now, &updates.phase2).await;
+        let increases = self.still_fitting(now, &updates.phase2, &failed);
+        warn!(
+            refused = failed.len(),
+            held_back = updates.phase2.len() - increases.len(),
+            "not every decrease was accepted; increases that don't fit wait for the next plan"
+        );
+        self.push(now, &increases).await;
+    }
+
+    /// The increases that can still go out after the decreases for the `failed` EVSEs were
+    /// not accepted: all of those for other EVSEs if, together with every EVSE's effective
+    /// profile, they fit the capacity at all times, and none otherwise.
+    fn still_fitting(
+        &self,
+        now: i64,
+        increases: &[ProfileUpdate],
+        failed: &BTreeSet<EvseRef>,
+    ) -> Vec<ProfileUpdate> {
+        let candidates: Vec<ProfileUpdate> = increases
+            .iter()
+            .filter(|u| !failed.contains(&u.evse))
+            .cloned()
+            .collect();
+        // Read again: phase 1 changed the effective profiles.
+        let (request, mut effective) = self.request(now);
+        let fallback = StepProfile::constant(now, self.site_config().fallback_limit_w);
+        let planned = request.sessions.iter().map(|s| &s.evse);
+        for evse in planned.chain(request.held.iter().map(|h| &h.evse)) {
+            effective
+                .entry(evse.clone())
+                .or_insert_with(|| fallback.clone());
+        }
+        for update in &candidates {
+            effective.insert(update.evse.clone(), update.profile.clone());
+        }
+        if within_capacity(now, request.planning_capacity_w(), effective.values()) {
+            candidates
+        } else {
+            Vec::new()
+        }
     }
 
     /// The planner input at `now`, and the effective profiles of the sessions it plans.
@@ -156,25 +204,55 @@ impl Controller {
         let settings = &self.state.config.control;
         let site = self.state.site();
         let mut sessions = Vec::new();
+        let mut held = Vec::new();
         let mut effective = BTreeMap::new();
         let mut reserved_w = 0.0;
+        let default_limit_w = |evse: &EvseRef| {
+            site.default_limit_w(
+                &evse.station_id,
+                site_config.fallback_limit_w,
+                site_config.evse_max_w,
+            )
+        };
         for session in site.sessions() {
             let profile = site.effective_profiles().get(&session.evse);
             if self.is_connected(&session.evse) {
-                sessions.push(session.to_state(site_config.evse_max_w).request(
-                    now,
-                    settings.slot_secs,
-                    &site_config.needs_defaults,
-                ));
-                if let Some(p) = profile {
-                    effective.insert(session.evse.clone(), p.clone());
+                if session.ev_suspended {
+                    held.push(HeldSession {
+                        id: session.transaction_id.as_str().into(),
+                        evse: session.evse.clone(),
+                    });
+                } else {
+                    sessions.push(session.to_state(site_config.evse_max_w).request(
+                        now,
+                        settings.slot_secs,
+                        &site_config.needs_defaults,
+                    ));
+                }
+                // Without a TxProfile, a station that refused its TxDefaultProfile lets the
+                // EV draw the full rating.
+                let current = profile.cloned().or_else(|| {
+                    let limit_w = default_limit_w(&session.evse);
+                    (limit_w != site_config.fallback_limit_w)
+                        .then(|| StepProfile::constant(now, limit_w))
+                });
+                if let Some(p) = current {
+                    effective.insert(session.evse.clone(), p);
                 }
             } else {
-                reserved_w += profile.map_or(site_config.fallback_limit_w, |p| p.peak_from(now));
+                reserved_w += profile.map_or(default_limit_w(&session.evse), |p| p.peak_from(now));
             }
         }
         let busy: BTreeSet<&EvseRef> = site.sessions().map(|s| &s.evse).collect();
-        let idle_evses = site.evses().iter().filter(|e| !busy.contains(e)).count();
+        let mut idle_evses = 0;
+        for evse in site.evses().iter().filter(|e| !busy.contains(e)) {
+            let limit_w = default_limit_w(evse);
+            if limit_w == site_config.fallback_limit_w {
+                idle_evses += 1;
+            } else {
+                reserved_w += limit_w;
+            }
+        }
         let request = PlanRequest {
             now_secs: now,
             slot_secs: settings.slot_secs,
@@ -182,6 +260,7 @@ impl Controller {
             idle_evses,
             fallback_limit_w: site_config.fallback_limit_w,
             sessions,
+            held,
         };
         (request, effective)
     }
@@ -192,10 +271,15 @@ impl Controller {
     }
 
     /// Sends the updates concurrently (each station still gets one call at a time). Returns
-    /// whether every EVSE now follows its update.
-    async fn push(&self, now: i64, updates: &[ProfileUpdate]) -> bool {
+    /// the EVSEs that may not follow their update.
+    async fn push(&self, now: i64, updates: &[ProfileUpdate]) -> BTreeSet<EvseRef> {
         let applied = join_all(updates.iter().map(|u| self.send(now, u))).await;
-        applied.into_iter().all(|ok| ok)
+        updates
+            .iter()
+            .zip(applied)
+            .filter(|(_, ok)| !ok)
+            .map(|(u, _)| u.evse.clone())
+            .collect()
     }
 
     /// Sends one update and records what the EVSE follows now. Returns whether it follows
@@ -221,7 +305,10 @@ impl Controller {
                     .get(&update.evse)
                     .cloned()
                     .unwrap_or_else(|| StepProfile::constant(now, fallback));
-                site.set_effective(update.evse.clone(), old.pointwise_max(&update.profile, now));
+                site.set_effective_bound(
+                    update.evse.clone(),
+                    old.pointwise_max(&update.profile, now),
+                );
                 false
             }
         }
@@ -320,6 +407,34 @@ mod tests {
         assert_eq!(request.capacity_w, 100_000.0 - 7_000.0 - 1_400.0);
     }
 
+    /// CS1 refused its TxDefaultProfile: its idle EVSE 2 and its session on EVSE 1, which
+    /// has no TxProfile yet, may both draw the full 22 kW.
+    #[tokio::test]
+    async fn stations_without_a_tx_default_profile_are_reserved_at_full_rating() {
+        let c = controller();
+        let cs1 = StationId::try_from("CS1").unwrap();
+        let _registration = c.state.registry.register(
+            cs1.clone(),
+            StationHandle::new(tokio::sync::mpsc::channel(1).0),
+        );
+        let now = c.state.clock.now_secs();
+        {
+            let mut site = c.state.site();
+            let t = DateTime::now();
+            site.touch(&cs1, t).evses.insert(2, EvseState::default());
+            site.start_session(Session::new("a", evse("CS1", 1), t));
+            assert!(site.set_tx_default_refused(&cs1, true));
+        }
+
+        let (request, effective) = c.request(now);
+        assert_eq!(request.idle_evses, 0);
+        assert_eq!(request.capacity_w, 100_000.0 - 22_000.0);
+        assert_eq!(
+            effective[&evse("CS1", 1)],
+            StepProfile::constant(now, 22_000.0)
+        );
+    }
+
     #[test]
     fn bad_settings_are_refused() {
         let with = |control: ControlSettings| {
@@ -349,6 +464,13 @@ mod tests {
                 ..ControlSettings::default()
             }),
             Some(ControlError::ZeroSlot)
+        );
+        assert_eq!(
+            with(ControlSettings {
+                tick: std::time::Duration::ZERO,
+                ..ControlSettings::default()
+            }),
+            Some(ControlError::ZeroTick)
         );
     }
 }
@@ -509,6 +631,52 @@ mod loop_tests {
         sleep(Duration::from_secs(30)).await;
         assert_eq!(b.limit_now(1), 10_000.0);
         assert_eq!(c.limit_now(1), 10_000.0);
+        assert_limit_held(&site);
+    }
+
+    /// An EV that stops taking power is held at the fallback limit, not at 0 W, so when it
+    /// wants power again it can draw some and the station reports it charging.
+    #[tokio::test(start_paused = true)]
+    async fn a_paused_ev_can_charge_again() {
+        let site = site(100_000.0, "edf");
+        let mut cs = site.connect("CS1", 1).await;
+        cs.start("a", 1).await;
+        settle().await;
+        assert_eq!(cs.limit_now(1), EVSE_MAX_W);
+
+        cs.meter("a", 5_000.0, 0.0, true).await;
+        settle().await;
+        assert_eq!(cs.limit_now(1), FALLBACK_W);
+
+        cs.meter("a", 5_001.0, FALLBACK_W, false).await;
+        settle().await;
+        assert_eq!(cs.limit_now(1), EVSE_MAX_W);
+        assert_limit_held(&site);
+    }
+
+    /// B rejects its decrease, but C's increase fits even with B on its old profile, so it
+    /// still goes out.
+    #[tokio::test(start_paused = true)]
+    async fn increases_that_fit_go_out_despite_a_rejected_decrease() {
+        let site = site(50_000.0, "equal");
+        let mut a = site.connect("A", 1).await;
+        let mut b = site.connect("B", 1).await;
+        let mut c = site.connect("C", 1).await;
+        a.start("a", 1).await;
+        b.start("b", 1).await;
+        settle().await;
+        assert_eq!(a.limit_now(1), EVSE_MAX_W);
+        assert_eq!(b.limit_now(1), EVSE_MAX_W);
+
+        b.set_mode(Mode::Reject);
+        let departure = site.now_secs() + 3600;
+        b.needs(1, departure, 1_000_000.0, 11_000.0).await;
+        c.start("c", 1).await;
+        c.needs(1, departure, 1_000_000.0, 5_000.0).await;
+        settle().await;
+        // 22 + 22 (B's old profile) + 5 kW fits the 50 kW.
+        assert_eq!(b.limit_now(1), EVSE_MAX_W);
+        assert_eq!(c.limit_now(1), 5_000.0);
         assert_limit_held(&site);
     }
 

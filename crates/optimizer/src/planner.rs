@@ -17,13 +17,27 @@ pub struct PlanRequest {
     /// TxDefaultProfile) as soon as an EV plugs in, so that much is kept free for it.
     pub idle_evses: usize,
     pub fallback_limit_w: f64,
+    /// The sessions to schedule.
     pub sessions: Vec<SessionRequest>,
+    /// Sessions whose EV stopped taking power (it is full, or paused). They are not
+    /// scheduled but held at `fallback_limit_w`, reserved like an idle EVSE: at 0 W an EV
+    /// that wants power again could never show it.
+    pub held: Vec<HeldSession>,
+}
+
+/// A session held at the fallback limit, see [`PlanRequest::held`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeldSession {
+    pub id: SessionId,
+    pub evse: EvseRef,
 }
 
 impl PlanRequest {
-    /// Capacity left for the sessions after reserving the idle EVSEs' fallback limits.
+    /// Capacity left for the sessions after reserving the fallback limits of the idle EVSEs
+    /// and the held sessions.
     pub fn planning_capacity_w(&self) -> f64 {
-        (self.capacity_w - self.idle_evses as f64 * self.fallback_limit_w).max(0.0)
+        let reserved = (self.idle_evses + self.held.len()) as f64 * self.fallback_limit_w;
+        (self.capacity_w - reserved).max(0.0)
     }
 
     /// The slot containing `now_secs`.
@@ -54,7 +68,7 @@ pub struct Plan {
     /// The scheduler's input, kept for reporting and validation.
     pub site: SiteInput,
     pub schedule: Schedule,
-    /// One entry per session, in request order.
+    /// One entry per session, in request order, then one per held session.
     pub limits: Vec<EvseLimit>,
 }
 
@@ -122,6 +136,11 @@ impl<S: Scheduler> Planner<S> {
                     ),
                 }
             })
+            .chain(request.held.iter().map(|h| EvseLimit {
+                evse: h.evse.clone(),
+                session: h.id.clone(),
+                profile: StepProfile::constant(request.now_secs, request.fallback_limit_w),
+            }))
             .collect();
 
         Plan {
@@ -164,6 +183,7 @@ mod tests {
             idle_evses: 0,
             fallback_limit_w: 1_400.0,
             sessions,
+            held: Vec::new(),
         }
     }
 
@@ -189,6 +209,23 @@ mod tests {
         assert!((p[1].1 - 1_000.0).abs() < 1e-6, "{p:?}");
         assert_eq!(p[2], (480, 0.0));
         assert_eq!(p.len(), 3);
+    }
+
+    #[test]
+    fn held_sessions_get_the_fallback_limit_reserved() {
+        let mut r = request(1000 * 300, vec![session("a", 1, 1002, 22_000.0, 100_000.0)]);
+        r.held.push(HeldSession {
+            id: "b".into(),
+            evse: EvseRef {
+                station_id: "st".into(),
+                evse_id: 2,
+            },
+        });
+        assert_eq!(r.planning_capacity_w(), 20_000.0 - 1_400.0);
+        let plan = Planner::new(EqualShare, 96).plan(&r);
+        assert_eq!(periods(&plan.limits[0])[0], (0, 18_600.0));
+        assert_eq!(plan.limits[1].session, "b".into());
+        assert_eq!(periods(&plan.limits[1]), vec![(0, 1_400.0)]);
     }
 
     #[test]

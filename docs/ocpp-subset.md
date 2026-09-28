@@ -81,18 +81,32 @@ A `TransactionEvent` session is keyed by `transactionId` and planned once its EV
   `idToken`.
 
 Meter values are read from the most recent `meterValue` of the event, using only whole-EVSE
-sampled values (no `phase`), in `Wh`/`kWh` and `W`/`kW` with the unit's `multiplier`:
+sampled values (no `phase`), in `Wh`/`kWh` and `W`/`kW` with the unit's `multiplier`. A value
+measured at the outlet (the default `location`) wins over one measured elsewhere, such as at
+the inlet. A reading older than the last one applied, from an event the station queued while
+offline, is ignored:
 
 | Measurand | Use |
 |---|---|
-| `Energy.Active.Import.Register` (also a value with no measurand) | Delivered energy, counted from the first reading of the transaction |
+| `Energy.Active.Import.Register` (also a value with no measurand) | Delivered energy, counted from the first reading of the transaction (so a `Started` event without a reading leaves out what was delivered before the first one) |
 | `Power.Active.Import` | The power drawn, which teaches the EV's own max power |
 
 An EV that draws clearly less than its limit (by 5 % or 500 W, whichever is more) is
 limiting itself, so the planner stops reserving more for it and plans it at that draw plus the
 same margin. It is only learned while `chargingState` is `Charging`: an EV that is merely
-plugged in draws nothing. `SuspendedEV` marks the EV as full, so it needs nothing more until it
-charges again. `SuspendedEVSE` changes nothing: that is the station obeying a 0 W limit.
+plugged in draws nothing. It is also only learned when the CSMS knows the limit the reading
+was taken under: not from a reading older than the EVSE's current TxProfile, nor while a
+profile update to the EVSE is unanswered.
+
+A known limitation: once learned, the value can only grow by the margin at a time, and the
+margin is never larger than the threshold for sending a new profile (below), so the growth is
+never sent. An EV that limits itself for a while, for example with a cold battery, stays
+capped near that draw for the rest of its session. Offering such EVs more when the site has
+capacity to spare would fix it. `SuspendedEV` means the EV stopped taking power (it is full, or paused). It isn't planned
+until it charges again, but held at the fallback limit, which is kept free for it like for an
+idle EVSE: at 0 W an EV that wants power again could never draw any, and the station would
+never report it `Charging`. `SuspendedEVSE` changes nothing: that is the station obeying a
+0 W limit.
 
 ## Charging needs
 
@@ -117,7 +131,9 @@ The CSMS sends two kinds of profile, both with `stackLevel` 0 and `chargingRateU
 - **`TxDefaultProfile`**, right after an accepted `BootNotification`: `evseId` 0, id 1,
   `Absolute` from the boot time, one period at the fallback limit (1.4 kW by default). Every
   EVSE of the station stays within that until it gets a plan, and falls back to it if the
-  CSMS goes away.
+  CSMS goes away. If the station rejects it or doesn't answer, the CSMS assumes its EVSEs may
+  draw their full rating until they get a TxProfile, until a later boot's TxDefaultProfile is
+  accepted.
 - **`TxProfile`** for each running transaction: `Absolute`, the `transactionId` set, id
   `100 + evseId` so each new profile replaces the one before, `startSchedule` = the planning
   time, and one `chargingSchedulePeriod` per change in the planned limit. The last period is
@@ -135,7 +151,9 @@ as the offline simulator:
   ends, charging needs arrive for a running session, an EV becomes full or charges again, a
   new EVSE is reported, or a station disconnects. The 1 s turns a burst of events into one plan.
 - **Input:** each session's needs, reported or assumed. The planner's capacity is the grid
-  limit minus the fallback limit of every idle EVSE, which may start drawing it at any moment.
+  limit minus the fallback limit of every idle EVSE, which may start drawing it at any moment
+  (the full rating on a station without a TxDefaultProfile), and of every EV held there
+  because it stopped taking power.
   Sessions on a disconnected station can't be steered: their highest future limit is taken
   off the capacity and they are left out of the plan.
 - **Threshold:** a new profile is only sent when, at some point, it differs from the one in
@@ -154,11 +172,13 @@ side when it can't be sure:
 | What happened | What the CSMS assumes |
 |---|---|
 | `Accepted` | The new profile |
-| `Rejected`, or a CALLERROR | The old profile. If this was a decrease, the increases wait for the next tick |
+| `Rejected`, or a CALLERROR | The old profile |
 | Timeout, disconnect, or an answer it can't read | The higher of the old and the new profile at every moment, until a later one is accepted |
 
-A station that keeps rejecting decreases therefore holds back increases on the whole site.
-Handling it separately, like a disconnected station, is future work.
+When a decrease is not accepted, the increases for the other EVSEs still go out if, with
+every EVSE on the profile the CSMS assumes for it, they fit the limit at all times; otherwise
+they wait for the next tick. A station that keeps rejecting its decreases thus holds back
+only the increases that would need its capacity.
 
 One short window remains. When an EV throttled below the fallback limit leaves, its EVSE is
 back on its TxDefaultProfile before the next plan (about 1 s later) has made room for it. An
@@ -230,11 +250,15 @@ A default is only a guess, so it rolls forward instead of cutting the EV off:
   `crates/csms/src/station_id.rs`).
 - Part 4 says to close the connection when no subprotocol is agreed, but as far as we know
   it doesn't name a close code. 1002 (protocol error) is our choice.
-- A TxDefaultProfile on `evseId` 0 should limit each EVSE separately, not the station as a
-  whole (`crates/csms/src/profiles.rs`).
-- A SetChargingProfile whose id already exists on the station should replace that profile
-  (`crates/csms/src/profiles.rs`).
-- A sampled value without a `measurand` should be `Energy.Active.Import.Register`
-  (`crates/csms/src/meter.rs`).
-- A TransactionEventResponse should include `idTokenInfo` whenever the request has an
-  `idToken` (`crates/csms/src/transactions.rs`).
+- A SetChargingProfile whose id already exists on the station should replace that profile,
+  as we read Part 2 (marked `TODO(spec)` in `crates/csms/src/profiles.rs`).
+- The schema makes `idTokenInfo` in a TransactionEventResponse optional. We send it whenever
+  the request has an `idToken`; whether Part 2 expects that should be confirmed (marked
+  `TODO(spec)` in `crates/csms/src/transactions.rs`).
+
+Settled by the OCA schemas in [`specs/ocpp-2.0.1/`](../specs/ocpp-2.0.1/):
+
+- A TxDefaultProfile on `evseId` 0 limits each EVSE separately, not the station as a whole
+  (the `evseId` description in `SetChargingProfileRequest.json`).
+- A sampled value without a `measurand` is `Energy.Active.Import.Register` (the enum's
+  default in `TransactionEventRequest.json`).

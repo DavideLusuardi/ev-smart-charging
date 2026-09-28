@@ -117,10 +117,7 @@ pub fn dispatch(
             .map(|((t, eff), &c)| if c { &t.profile } else { *eff })
             .chain(untargeted.iter().copied())
             .collect();
-        sample_times(now_secs, state.iter().copied()).all(|t| {
-            let total: f64 = state.iter().map(|p| p.value_at(t)).sum();
-            total <= capacity_w + tolerance(capacity_w)
-        })
+        within_capacity(now_secs, capacity_w, state)
     };
     if !fits(&changed) {
         changed = targets
@@ -151,6 +148,19 @@ pub fn dispatch(
         }
     }
     out
+}
+
+/// Whether `profiles` together stay within `capacity_w` at every time from `now_secs` on.
+pub fn within_capacity<'a>(
+    now_secs: i64,
+    capacity_w: f64,
+    profiles: impl IntoIterator<Item = &'a StepProfile>,
+) -> bool {
+    let profiles: Vec<&StepProfile> = profiles.into_iter().collect();
+    sample_times(now_secs, profiles.iter().copied()).all(|t| {
+        let total: f64 = profiles.iter().map(|p| p.value_at(t)).sum();
+        total <= capacity_w + tolerance(capacity_w)
+    })
 }
 
 /// Limits up to this are "not charging".
@@ -329,5 +339,15 @@ mod tests {
         assert_eq!(ids(&run(54_500.0, &targets, &eff).phase1), vec![1]);
         // Over the limit whatever is sent: the drop still goes out, as close as it gets.
         assert_eq!(ids(&run(50_000.0, &targets, &eff).phase1), vec![1]);
+    }
+
+    #[test]
+    fn capacity_is_checked_at_every_step() {
+        let a = StepProfile::from_steps(NOW, [(0, 6_000.0), (600, 9_000.0)]);
+        let b = StepProfile::constant(NOW - 60, 5_000.0);
+        assert!(within_capacity(NOW, 14_000.0, [&a, &b]));
+        // Fits now, but not once `a` steps up.
+        assert!(!within_capacity(NOW, 12_000.0, [&a, &b]));
+        assert!(within_capacity(NOW, 0.0, []));
     }
 }
