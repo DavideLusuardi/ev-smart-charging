@@ -96,7 +96,13 @@ limiting itself, so the planner stops reserving more for it and plans it at that
 same margin. It is only learned while `chargingState` is `Charging`: an EV that is merely
 plugged in draws nothing. It is also only learned when the CSMS knows the limit the reading
 was taken under: not from a reading older than the EVSE's current TxProfile, nor while a
-profile update to the EVSE is unanswered. `SuspendedEV` means the EV stopped taking power (it is full, or paused). It isn't planned
+profile update to the EVSE is unanswered.
+
+A known limitation: once learned, the value can only grow by the margin at a time, and the
+margin is never larger than the threshold for sending a new profile (below), so the growth is
+never sent. An EV that limits itself for a while, for example with a cold battery, stays
+capped near that draw for the rest of its session. Offering such EVs more when the site has
+capacity to spare would fix it. `SuspendedEV` means the EV stopped taking power (it is full, or paused). It isn't planned
 until it charges again, but held at the fallback limit, which is kept free for it like for an
 idle EVSE: at 0 W an EV that wants power again could never draw any, and the station would
 never report it `Charging`. `SuspendedEVSE` changes nothing: that is the station obeying a
