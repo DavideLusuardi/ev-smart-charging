@@ -162,11 +162,13 @@ side when it can't be sure:
 | What happened | What the CSMS assumes |
 |---|---|
 | `Accepted` | The new profile |
-| `Rejected`, or a CALLERROR | The old profile. If this was a decrease, the increases wait for the next tick |
+| `Rejected`, or a CALLERROR | The old profile |
 | Timeout, disconnect, or an answer it can't read | The higher of the old and the new profile at every moment, until a later one is accepted |
 
-A station that keeps rejecting decreases therefore holds back increases on the whole site.
-Handling it separately, like a disconnected station, is future work.
+When a decrease is not accepted, the increases for the other EVSEs still go out if, with
+every EVSE on the profile the CSMS assumes for it, they fit the limit at all times; otherwise
+they wait for the next tick. A station that keeps rejecting its decreases thus holds back
+only the increases that would need its capacity.
 
 One short window remains. When an EV throttled below the fallback limit leaves, its EVSE is
 back on its TxDefaultProfile before the next plan (about 1 s later) has made room for it. An

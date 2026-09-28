@@ -5,6 +5,8 @@
 //! ([`Planner`] and [`dispatch`]); this module only gathers the input and talks to the
 //! stations. Profiles go out in two phases so the grid limit holds while stations accept
 //! them in any order: first the pure decreases, then, once every one is accepted, the rest.
+//! When some decreases are not accepted, the increases for the other EVSEs still go out if
+//! they fit with those EVSEs on their current profiles.
 //!
 //! The CSMS keeps, per EVSE, the profile it believes the station follows (its *effective*
 //! profile), and stays on the safe side when it can't be sure:
@@ -24,7 +26,7 @@ use ocpp::messages::SetChargingProfile;
 use ocpp::messages::set_charging_profile::ChargingProfileStatus;
 use optimizer::{
     EvseRef, PlanRequest, Planner, ProfileUpdate, Scheduler, StepProfile, dispatch,
-    scheduler_by_name,
+    scheduler_by_name, within_capacity,
 };
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, info, info_span, warn};
@@ -149,11 +151,50 @@ impl Controller {
             increases = updates.phase2.len(),
             "sending profiles"
         );
-        if !self.push(now, &updates.phase1).await {
-            warn!("not every decrease was accepted; increases wait for the next plan");
+        let failed = self.push(now, &updates.phase1).await;
+        if failed.is_empty() {
+            self.push(now, &updates.phase2).await;
             return;
         }
-        self.push(now, &updates.phase2).await;
+        let increases = self.still_fitting(now, &updates.phase2, &failed);
+        warn!(
+            refused = failed.len(),
+            held_back = updates.phase2.len() - increases.len(),
+            "not every decrease was accepted; increases that don't fit wait for the next plan"
+        );
+        self.push(now, &increases).await;
+    }
+
+    /// The increases that can still go out after the decreases for the `failed` EVSEs were
+    /// not accepted: all of those for other EVSEs if, together with every EVSE's effective
+    /// profile, they fit the capacity at all times, and none otherwise.
+    fn still_fitting(
+        &self,
+        now: i64,
+        increases: &[ProfileUpdate],
+        failed: &BTreeSet<EvseRef>,
+    ) -> Vec<ProfileUpdate> {
+        let candidates: Vec<ProfileUpdate> = increases
+            .iter()
+            .filter(|u| !failed.contains(&u.evse))
+            .cloned()
+            .collect();
+        // Read again: phase 1 changed the effective profiles.
+        let (request, mut effective) = self.request(now);
+        let fallback = StepProfile::constant(now, self.site_config().fallback_limit_w);
+        for session in &request.sessions {
+            effective
+                .entry(session.evse.clone())
+                .or_insert_with(|| fallback.clone());
+        }
+        for update in &candidates {
+            effective.insert(update.evse.clone(), update.profile.clone());
+        }
+        if within_capacity(now, request.planning_capacity_w(), effective.values()) {
+            candidates
+        } else {
+            Vec::new()
+        }
     }
 
     /// The planner input at `now`, and the effective profiles of the sessions it plans.
@@ -220,10 +261,15 @@ impl Controller {
     }
 
     /// Sends the updates concurrently (each station still gets one call at a time). Returns
-    /// whether every EVSE now follows its update.
-    async fn push(&self, now: i64, updates: &[ProfileUpdate]) -> bool {
+    /// the EVSEs that may not follow their update.
+    async fn push(&self, now: i64, updates: &[ProfileUpdate]) -> BTreeSet<EvseRef> {
         let applied = join_all(updates.iter().map(|u| self.send(now, u))).await;
-        applied.into_iter().all(|ok| ok)
+        updates
+            .iter()
+            .zip(applied)
+            .filter(|(_, ok)| !ok)
+            .map(|(u, _)| u.evse.clone())
+            .collect()
     }
 
     /// Sends one update and records what the EVSE follows now. Returns whether it follows
@@ -575,6 +621,32 @@ mod loop_tests {
         sleep(Duration::from_secs(30)).await;
         assert_eq!(b.limit_now(1), 10_000.0);
         assert_eq!(c.limit_now(1), 10_000.0);
+        assert_limit_held(&site);
+    }
+
+    /// B rejects its decrease, but C's increase fits even with B on its old profile, so it
+    /// still goes out.
+    #[tokio::test(start_paused = true)]
+    async fn increases_that_fit_go_out_despite_a_rejected_decrease() {
+        let site = site(50_000.0, "equal");
+        let mut a = site.connect("A", 1).await;
+        let mut b = site.connect("B", 1).await;
+        let mut c = site.connect("C", 1).await;
+        a.start("a", 1).await;
+        b.start("b", 1).await;
+        settle().await;
+        assert_eq!(a.limit_now(1), EVSE_MAX_W);
+        assert_eq!(b.limit_now(1), EVSE_MAX_W);
+
+        b.set_mode(Mode::Reject);
+        let departure = site.now_secs() + 3600;
+        b.needs(1, departure, 1_000_000.0, 11_000.0).await;
+        c.start("c", 1).await;
+        c.needs(1, departure, 1_000_000.0, 5_000.0).await;
+        settle().await;
+        // 22 + 22 (B's old profile) + 5 kW fits the 50 kW.
+        assert_eq!(b.limit_now(1), EVSE_MAX_W);
+        assert_eq!(c.limit_now(1), 5_000.0);
         assert_limit_held(&site);
     }
 

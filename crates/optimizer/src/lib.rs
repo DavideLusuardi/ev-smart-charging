@@ -13,7 +13,7 @@ pub mod planner;
 pub mod profile;
 pub mod types;
 
-pub use control::{ControlConfig, Dispatch, ProfileUpdate, dispatch};
+pub use control::{ControlConfig, Dispatch, ProfileUpdate, dispatch, within_capacity};
 pub use edf::Edf;
 pub use equal_share::EqualShare;
 #[cfg(feature = "lp")]
