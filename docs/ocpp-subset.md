@@ -96,8 +96,11 @@ limiting itself, so the planner stops reserving more for it and plans it at that
 same margin. It is only learned while `chargingState` is `Charging`: an EV that is merely
 plugged in draws nothing. It is also only learned when the CSMS knows the limit the reading
 was taken under: not from a reading older than the EVSE's current TxProfile, nor while a
-profile update to the EVSE is unanswered. `SuspendedEV` marks the EV as full, so it needs nothing more until it
-charges again. `SuspendedEVSE` changes nothing: that is the station obeying a 0 W limit.
+profile update to the EVSE is unanswered. `SuspendedEV` means the EV stopped taking power (it is full, or paused). It isn't planned
+until it charges again, but held at the fallback limit, which is kept free for it like for an
+idle EVSE: at 0 W an EV that wants power again could never draw any, and the station would
+never report it `Charging`. `SuspendedEVSE` changes nothing: that is the station obeying a
+0 W limit.
 
 ## Charging needs
 
@@ -143,7 +146,8 @@ as the offline simulator:
   new EVSE is reported, or a station disconnects. The 1 s turns a burst of events into one plan.
 - **Input:** each session's needs, reported or assumed. The planner's capacity is the grid
   limit minus the fallback limit of every idle EVSE, which may start drawing it at any moment
-  (the full rating on a station without a TxDefaultProfile).
+  (the full rating on a station without a TxDefaultProfile), and of every EV held there
+  because it stopped taking power.
   Sessions on a disconnected station can't be steered: their highest future limit is taken
   off the capacity and they are left out of the plan.
 - **Threshold:** a new profile is only sent when, at some point, it differs from the one in

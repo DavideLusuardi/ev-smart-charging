@@ -133,7 +133,8 @@ On every control tick the **planner** takes the site state (the grid limit, the 
 with their departure time, remaining energy and max power, and the idle EVSEs) and:
 
 1. reserves each idle EVSE's fallback limit, so an EV that plugs in before the next plan
-   can't push the site over its limit;
+   can't push the site over its limit, and holds EVs that stopped taking power (full or
+   paused) at that limit too, so they can start again;
 2. splits time into fixed slots (5 min by default in the CSMS) from now up to the latest
    departure, capped at 144 slots (12 h; OCPP allows at most 1024 periods per profile);
 3. asks a **scheduler** for a power per session and slot, within the site capacity, each

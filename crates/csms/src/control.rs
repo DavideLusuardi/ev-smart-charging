@@ -25,7 +25,7 @@ use futures_util::future::join_all;
 use ocpp::messages::SetChargingProfile;
 use ocpp::messages::set_charging_profile::ChargingProfileStatus;
 use optimizer::{
-    EvseRef, PlanRequest, Planner, ProfileUpdate, Scheduler, StepProfile, dispatch,
+    EvseRef, HeldSession, PlanRequest, Planner, ProfileUpdate, Scheduler, StepProfile, dispatch,
     scheduler_by_name, within_capacity,
 };
 use tokio::task::JoinHandle;
@@ -182,9 +182,10 @@ impl Controller {
         // Read again: phase 1 changed the effective profiles.
         let (request, mut effective) = self.request(now);
         let fallback = StepProfile::constant(now, self.site_config().fallback_limit_w);
-        for session in &request.sessions {
+        let planned = request.sessions.iter().map(|s| &s.evse);
+        for evse in planned.chain(request.held.iter().map(|h| &h.evse)) {
             effective
-                .entry(session.evse.clone())
+                .entry(evse.clone())
                 .or_insert_with(|| fallback.clone());
         }
         for update in &candidates {
@@ -203,6 +204,7 @@ impl Controller {
         let settings = &self.state.config.control;
         let site = self.state.site();
         let mut sessions = Vec::new();
+        let mut held = Vec::new();
         let mut effective = BTreeMap::new();
         let mut reserved_w = 0.0;
         let default_limit_w = |evse: &EvseRef| {
@@ -215,11 +217,18 @@ impl Controller {
         for session in site.sessions() {
             let profile = site.effective_profiles().get(&session.evse);
             if self.is_connected(&session.evse) {
-                sessions.push(session.to_state(site_config.evse_max_w).request(
-                    now,
-                    settings.slot_secs,
-                    &site_config.needs_defaults,
-                ));
+                if session.ev_suspended {
+                    held.push(HeldSession {
+                        id: session.transaction_id.as_str().into(),
+                        evse: session.evse.clone(),
+                    });
+                } else {
+                    sessions.push(session.to_state(site_config.evse_max_w).request(
+                        now,
+                        settings.slot_secs,
+                        &site_config.needs_defaults,
+                    ));
+                }
                 // Without a TxProfile, a station that refused its TxDefaultProfile lets the
                 // EV draw the full rating.
                 let current = profile.cloned().or_else(|| {
@@ -251,6 +260,7 @@ impl Controller {
             idle_evses,
             fallback_limit_w: site_config.fallback_limit_w,
             sessions,
+            held,
         };
         (request, effective)
     }
@@ -621,6 +631,26 @@ mod loop_tests {
         sleep(Duration::from_secs(30)).await;
         assert_eq!(b.limit_now(1), 10_000.0);
         assert_eq!(c.limit_now(1), 10_000.0);
+        assert_limit_held(&site);
+    }
+
+    /// An EV that stops taking power is held at the fallback limit, not at 0 W, so when it
+    /// wants power again it can draw some and the station reports it charging.
+    #[tokio::test(start_paused = true)]
+    async fn a_paused_ev_can_charge_again() {
+        let site = site(100_000.0, "edf");
+        let mut cs = site.connect("CS1", 1).await;
+        cs.start("a", 1).await;
+        settle().await;
+        assert_eq!(cs.limit_now(1), EVSE_MAX_W);
+
+        cs.meter("a", 5_000.0, 0.0, true).await;
+        settle().await;
+        assert_eq!(cs.limit_now(1), FALLBACK_W);
+
+        cs.meter("a", 5_001.0, FALLBACK_W, false).await;
+        settle().await;
+        assert_eq!(cs.limit_now(1), EVSE_MAX_W);
         assert_limit_held(&site);
     }
 

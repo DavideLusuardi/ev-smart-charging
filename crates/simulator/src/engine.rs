@@ -13,8 +13,8 @@ use std::time::Instant;
 
 use optimizer::types::tolerance;
 use optimizer::{
-    EvseRef, KnownNeeds, PlanRequest, Planner, Scheduler, SessionState, StepProfile, Violation,
-    dispatch, observe_draw,
+    EvseRef, HeldSession, KnownNeeds, PlanRequest, Planner, Scheduler, SessionState, StepProfile,
+    Violation, dispatch, observe_draw,
 };
 
 use crate::arrivals::{EvArrival, START_SECS};
@@ -200,9 +200,19 @@ pub fn run(
             .collect();
         let tick = (t - START_SECS) % i64::from(control.tick_secs) == 0;
         if (replan || tick) && !plugged.is_empty() {
-            let sessions = plugged
+            // A full EV is held at the fallback limit, like on the CSMS, rather than planned.
+            let (full, charging): (Vec<_>, Vec<_>) =
+                plugged.iter().partition(|&&(_, i)| state[i].full);
+            let held = full
                 .iter()
-                .map(|&(evse, i)| {
+                .map(|&&(evse, i)| HeldSession {
+                    id: evs[i].id.as_str().into(),
+                    evse: evses[evse].clone(),
+                })
+                .collect();
+            let sessions = charging
+                .iter()
+                .map(|&&(evse, i)| {
                     let ev = &evs[i];
                     SessionState {
                         id: ev.id.as_str().into(),
@@ -228,6 +238,7 @@ pub fn run(
                 idle_evses: evses.len() - plugged.len(),
                 fallback_limit_w: site.fallback_limit_w,
                 sessions,
+                held,
             };
 
             let started = Instant::now();
@@ -264,7 +275,13 @@ pub fn run(
                 .get(&evses[evse])
                 .map_or(site.fallback_limit_w, |p| p.value_at(t))
                 .min(site.evse_max_w);
-            let wanted = (ev.energy_wh - s.delivered_wh).max(0.0) / step_hours;
+            // A full EV has stopped taking power, even for the last few mWh short of its
+            // target.
+            let wanted = if s.full {
+                0.0
+            } else {
+                (ev.energy_wh - s.delivered_wh).max(0.0) / step_hours
+            };
             let power = limit.min(ev.max_power_w).min(wanted).max(0.0);
             s.delivered_wh += power * step_hours;
             total_w += power;

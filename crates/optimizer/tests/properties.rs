@@ -151,6 +151,7 @@ fn arb_plan_request() -> impl Strategy<Value = PlanRequest> {
                     idle_evses,
                     fallback_limit_w,
                     sessions,
+                    held: Vec::new(),
                 })
             },
         )
