@@ -188,20 +188,21 @@ power) or when all EVs leave together. Two caveats:
   gets it is arbitrary, and one can be starved. Equal share is the one to use if fairness
   matters more than energy.
 - The LP is optimal only for one snapshot. Under the receding horizon, with EVs arriving
-  that no plan knew about, it loses that edge. On the `hub` scenario (5 days, seed 1,
-  1139 EVs):
+  that no plan knew about, and with assumed needs for the EVs that don't report theirs, it
+  loses that edge. Energy delivered, as % of deliverable, averaged over 10 seeds of 7 days
+  ([full results](docs/benchmark.md)):
 
   | | `equal` | `edf` | `lp` |
   |---|---|---|---|
-  | Energy delivered, % of deliverable | 98.68 % | **98.73 %** | 98.67 % |
-  | EVs satisfied | 989 | **1013** | 981 |
-  | Mean plan time | 0.003 ms | 0.003 ms | 0.274 ms |
+  | `workplace` (30 % of EVs report their needs) | 97.36 % | **98.12 %** | 96.78 % |
+  | `hub` (50 % report) | 99.31 % | **99.47 %** | 99.08 % |
+  | `workplace`, every EV reports | 97.41 % | 99.88 % | **99.99 %** |
 
-  That is why EDF is the default. These numbers come from one run with one seed: treat them
-  as a first indication, not a benchmark. Differences this small may change sign with
-  another seed.
+  That is why EDF is the default: it is best with the partial information a site has
+  today, and the LP only pulls ahead when nearly every EV reports its needs.
 
-To compare them yourself, see [Running the simulator](#running-the-simulator).
+To compare them yourself, see [Running the simulator](#running-the-simulator), or rerun the
+whole benchmark with `scripts/benchmark.sh` ([docs/benchmark.md](docs/benchmark.md#setup)).
 
 ### The LP model
 
