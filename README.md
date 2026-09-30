@@ -3,17 +3,54 @@
 A Charging Station Management System (CSMS) in Rust that speaks OCPP 2.0.1 and shares a
 site's limited grid power across connected EVs with a scheduling optimizer.
 
+Chargers connect over WebSocket. The CSMS tracks their sessions, the energy each EV still
+needs and when it leaves, and re-plans the site every 30 s and after every event: an EV
+plugs in or leaves, reports its needs, or pauses. Each EVSE gets its share of the grid limit
+as an OCPP charging profile. Three schedulers are available: equal share, earliest deadline
+first, and a linear program solved with HiGHS. Profiles go out in an order that keeps the
+site within its limit at every moment, whichever order the stations accept them in. An
+offline simulator runs the same planning code on a week of generated arrivals in seconds,
+to compare the schedulers.
+
+**Results in one line:** over 10 simulated weeks per site, EDF delivers the most energy with
+the partial information real sites have, and the LP only wins once every EV reports its
+needs. See the [benchmark](docs/benchmark.md).
+
 ## Status
 
-Work in progress, not yet released.
+Version 0.1.0. What is in it:
 
-Working today:
-
-- OCPP-J framing and the OCPP 2.0.1 messages needed for smart charging
-- Three scheduling strategies and the receding-horizon planner
-- An offline simulator that benchmarks them on generated EV arrivals
+- OCPP-J framing and the OCPP 2.0.1 messages needed for smart charging, checked against the
+  official JSON schemas
 - The CSMS: station connections, boot, heartbeat, status and authorization, transactions and
-  meter values, EV charging needs, and a control loop that sends charging profiles
+  meter values, EV charging needs with site defaults, and a control loop that sends
+  charging profiles
+- Three scheduling strategies, the receding-horizon planner and the two-phase profile
+  dispatch, in a pure library
+- An offline simulator and a reproducible benchmark
+
+See [Limitations](#limitations) for what isn't.
+
+## Quickstart
+
+With Rust (via [rustup](https://rustup.rs)), cmake and a C++ compiler
+(`sudo apt install cmake g++` on Debian or Ubuntu):
+
+```sh
+cargo test --workspace                     # builds everything and runs the tests
+cargo run --release -p simulator -- offline --scenario hub --scheduler edf --days 7
+cargo run --release -p csms                # OCPP endpoint on ws://localhost:9000/ocpp/{stationId}
+```
+
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md): the crates, the CSMS's tasks and state at
+  runtime, and how the grid limit is kept at every moment
+- [docs/ocpp-subset.md](docs/ocpp-subset.md): the supported OCPP messages, profile
+  conventions, defaults for EVs that don't report their needs, and open spec questions
+- [docs/benchmark.md](docs/benchmark.md): the schedulers compared, with the value of
+  information and why EDF wins
+- [The optimizer](#the-optimizer), below: the planner, the schedulers and the LP model
 
 ## Crates
 
@@ -262,6 +299,35 @@ scheduler then falls back to equal share. After solving, the power is clamped to
 and scaled down wherever the solver's floating-point tolerance let a limit be exceeded by a
 hair. The LP needs the `lp` feature, which is on by default and builds HiGHS from source, so it
 needs cmake and a C++ compiler.
+
+## Limitations
+
+- **No persistence.** All state is in memory: after a restart the CSMS adopts running
+  transactions again from their next event, but without their history.
+- **No REST API or metrics.** Configuration is by command-line flags only, the grid limit
+  can't be changed while running, and drivers can't enter their needs in an app.
+- **No live simulator.** The CSMS is tested against in-process OCPP clients (fake stations
+  with a model that checks the grid limit), not against real chargers or a simulator over
+  the network.
+- **Idealized EVs.** Power limits are in W only. There is no AC minimum current, no DC taper
+  curve, and no phase balancing.
+- **Learned EV max power doesn't grow back.** An EV that limits itself for a while stays
+  capped near that draw for the rest of its session (see
+  [ocpp-subset.md](docs/ocpp-subset.md#sessions)).
+- **No security profiles.** Stations connect without authentication or TLS.
+
+## Roadmap
+
+In rough order:
+
+- A live simulator: stations that connect over WebSocket and run in real time
+- Postgres persistence, a REST API (stations, sessions, a live grid limit, drivers' needs),
+  and a TOML config file
+- Prometheus metrics, a Grafana dashboard, and a one-command `docker compose` demo
+- OCPP security profiles (basic auth, TLS, client certificates) and OCPP 1.6J
+- Real session traces, time-varying prices and solar, and fairness between EVs in the
+  benchmark
+- Realistic EV physics (minimum current, taper curves) and a scale test with 1,000 stations
 
 ## License
 
